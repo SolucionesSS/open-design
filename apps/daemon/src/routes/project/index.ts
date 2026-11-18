@@ -286,6 +286,29 @@ function sameLocalCatalogScopes(left: unknown, right: unknown): boolean {
 }
 
 /**
+ * Whether a raw-file response may be served immutable. Version-pinned cover
+ * and asset URLs (`?v=<mtime>`, as minted by `projectCoverUrl`) name the exact
+ * bytes: the ETag derives from the same size+mtime and an agent rewrite bumps
+ * the mtime (hence the URL), so a matching version is byte-stable and the
+ * browser can skip the revalidation roundtrip entirely on reload.
+ *
+ * Anything else revalidates: unversioned or mismatched versions, and
+ * substituted bytes (Vite dev-entry swap, preview-bridge injection) whose
+ * content can change without the source file's mtime moving.
+ */
+export function rawVersionedCacheControl(
+  versionParam: unknown,
+  mtimeMs: number,
+  substituted: boolean,
+): 'immutable' | 'revalidate' {
+  if (substituted) return 'revalidate';
+  if (typeof versionParam !== 'string') return 'revalidate';
+  const version = Number(versionParam);
+  if (!Number.isInteger(version) || version <= 0) return 'revalidate';
+  return version === Math.floor(mtimeMs) ? 'immutable' : 'revalidate';
+}
+
+/**
  * Upper bound for every asynchronous read POST /api/projects performs before
  * its project/conversation transaction. The Web enters an optimistic project
  * surface the moment it sends the request, so a stalled catalogue scan must
@@ -6262,9 +6285,7 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
     res.setHeader('Last-Modified', new Date(mtime).toUTCString());
     res.setHeader('Cache-Control', 'no-cache');
     return etag;
-  }
-
-  function rawRequestIsFresh(req: any, etag: string, mtimeMs: number): boolean {
+  }  function rawRequestIsFresh(req: any, etag: string, mtimeMs: number): boolean {
     // If-None-Match is authoritative when present (RFC 9110 §13.1.3): freshness
     // is decided solely by whether the ETag matches — do NOT fall through to
     // If-Modified-Since. Otherwise a same-second rewrite (ETag changes
@@ -6394,6 +6415,12 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
     let currentEtag: string | null = null;
     if (revalidate && !willSubstitute) {
       currentEtag = setRawRevalidationHeaders(res, meta);
+      // A matching `?v=` names these exact bytes (see
+      // `rawVersionedCacheControl`): serve immutable so reloads skip the
+      // revalidation roundtrip instead of paying one 304 per asset.
+      if (rawVersionedCacheControl(req.query?.v, meta.mtime, willSubstitute) === 'immutable') {
+        res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+      }
       if (rawRequestIsFresh(req, currentEtag, meta.mtime)) {
         return res.status(304).end();
       }
