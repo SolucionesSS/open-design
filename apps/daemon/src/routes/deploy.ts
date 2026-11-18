@@ -14,7 +14,7 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
   const { PROJECTS_DIR } = ctx.paths;
   const { randomUUID } = ctx.ids;
   const { getProject } = ctx.projectStore;
-  const { VERCEL_PROVIDER_ID, CLOUDFLARE_PAGES_PROVIDER_ID, isDeployProviderId, publicDeployConfigForProvider, readDeployConfig, writeDeployConfig, listCloudflarePagesZones, DeployError, listDeployments, publicDeployments, getDeployment, buildDeployFileSet, cloudflarePagesProjectNameForDeploy, deployToCloudflarePages, deployToVercel, upsertDeployment, publicDeployment, cloudflarePagesDeploymentMetadata, prepareDeployPreflight } = ctx.deploy;
+  const { VERCEL_PROVIDER_ID, CLOUDFLARE_PAGES_PROVIDER_ID, isDeployProviderId, publicDeployConfigForProvider, readDeployConfig, writeDeployConfig, listCloudflarePagesZones, DeployError, listDeployments, publicDeployments, getDeployment, buildDeployFileSet, cloudflarePagesProjectNameForDeploy, deployToCloudflarePages, deployToVercel, upsertDeployment, publicDeployment, cloudflarePagesDeploymentMetadata, prepareDeployPreflight, resolveIncludeProjectFiles } = ctx.deploy;
 
   /**
    * A DeployError now carries a specific `code` (MISSING_REFERENCES,
@@ -132,6 +132,17 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
       if (typeof fileName !== 'string' || !fileName.trim()) {
         return sendApiError(res, 400, 'BAD_REQUEST', 'fileName required');
       }
+      // PR-A0 hardening (REVIEW FIX): input-shape validation before any
+      // project lookup or auth, so malformed options fail closed with 400
+      // regardless of project existence. Omitted/true preserves the legacy
+      // file set exactly; explicit false publishes only the allowlisted
+      // reference closure (fail-closed).
+      let includeProjectFiles = true;
+      try {
+        includeProjectFiles = resolveIncludeProjectFiles(req.body?.includeProjectFiles);
+      } catch {
+        return sendApiError(res, 400, 'BAD_REQUEST', 'invalid includeProjectFiles: expected boolean');
+      }
       const deployProject = getProject(db, req.params.id);
       if (!deployProject) {
         return sendApiError(res, 404, 'PROJECT_NOT_FOUND', 'project not found');
@@ -144,10 +155,6 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
       )) return;
 
       const prior = getDeployment(db, req.params.id, fileName, providerId);
-      // PR-A0: per-deployment opt-in. Omitted/true preserves the legacy
-      // file set exactly; explicit false publishes only the strict
-      // reference closure (see isDeployInternalPath).
-      const includeProjectFiles = req.body?.includeProjectFiles !== false;
       const files = await buildDeployFileSet(
         PROJECTS_DIR,
         req.params.id,
@@ -243,6 +250,13 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
       if (typeof fileName !== 'string' || !fileName.trim()) {
         return sendApiError(res, 400, 'BAD_REQUEST', 'fileName required');
       }
+      // Input-shape validation before project lookup/auth (see deploy route).
+      let preflightIncludeProjectFiles = true;
+      try {
+        preflightIncludeProjectFiles = resolveIncludeProjectFiles(req.body?.includeProjectFiles);
+      } catch {
+        return sendApiError(res, 400, 'BAD_REQUEST', 'invalid includeProjectFiles: expected boolean');
+      }
       const preflightProject = getProject(db, req.params.id);
       if (!await ctx.authorizeProjectRequest(req, res, req.params.id, { mode: 'read' })) return;
       /** @type {import('@open-design/contracts').DeployPreflightResponse} */
@@ -250,7 +264,7 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
         PROJECTS_DIR,
         req.params.id,
         fileName,
-        { metadata: preflightProject?.metadata, providerId, includeProjectFiles: req.body?.includeProjectFiles !== false },
+        { metadata: preflightProject?.metadata, providerId, includeProjectFiles: preflightIncludeProjectFiles },
       );
       res.json(body);
     } catch (err: any) {

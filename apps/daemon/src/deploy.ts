@@ -37,6 +37,8 @@ type DeployFilePlan = {
   files: DeployFile[];
   missing: string[];
   invalid: string[];
+  /** Strict-mode references refused by the publish allowlist (see below). */
+  excluded: string[];
   /** Set when a walked reference resolves to the root index.html the entry is published as. */
   indexConflict: EntryIndexConflict | null;
 };
@@ -51,11 +53,46 @@ const isHtmlPath = (p: string) => /\.html?$/i.test(p);
 const isJavaScriptPath = (p: string) => /\.(?:js|mjs|cjs)$/i.test(p);
 
 /**
- * PR-A0: paths that must never ship when a deploy opts into strict mode
- * (`includeProjectFiles: false`). Covers the internal surfaces observed on
- * `design.solucionesss.com` (ESTADO.md, brand-status.json, *.md audits and
- * notes, generated `_build/` trees) while leaving every referenced public
- * asset (html/css/js/images/fonts) publishable. Pure and unit-tested.
+ * PR-A0 hardening (REVIEW FIX): strict publish allowlist.
+ *
+ * The reviewed finding is correct: a denylist of internal names is not an
+ * allowlist. In strict mode (`includeProjectFiles: false`) a file ships
+ * ONLY when `isStrictPublishableDeployPath` returns true, which combines:
+ *  - an extension allowlist of web-public asset types (html/css/js,
+ *    images, fonts, pdf, plain-text siblings of the page are NOT enough),
+ *  - location rules independent of extension (dot-paths, `*.artifact.json`
+ *    sidecars, `_build/` trees, `brand-status.json`).
+ * Everything else — markdown audits/notes, JSON status/databases, Python or
+ * Node sources, stylesheets outside the closure, experimental payloads —
+ * is excluded even when the entry (or one of its dependencies) references
+ * it, and the deploy refuses to continue (see EXCLUDED_REFERENCES).
+ *
+ * Verified against the real guide closure (95 file refs: 62 svg, 25 png,
+ * 8 ttf, 0 css/js): every genuine dependency is allowlisted, every
+ * observed internal (ESTADO.md, brand-status.json, *.md, _build/*) is not.
+ */
+const STRICT_PUBLISHABLE_EXTENSIONS = new Set([
+  'html', 'htm', 'css', 'js', 'mjs', 'cjs',
+  'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'mp4', 'webm', 'ogg', 'mp3', 'wav', 'pdf',
+]);
+
+export function isStrictPublishableDeployPath(p: string): boolean {
+  const normalized = String(p || '').toLowerCase();
+  if (!normalized || normalized.startsWith('.') || normalized.includes('/.')) return false;
+  if (normalized.endsWith('.artifact.json')) return false;
+  if (normalized === 'brand-status.json' || normalized.endsWith('/brand-status.json')) return false;
+  if (normalized === '_build' || normalized.startsWith('_build/') || normalized.includes('/_build/')) return false;
+  const base = normalized.split('/').pop() ?? '';
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return false;
+  return STRICT_PUBLISHABLE_EXTENSIONS.has(base.slice(dot + 1));
+}
+
+/**
+ * Legacy denylist helper kept for the pre-existing unit contract.
+ * Strict mode no longer relies on it alone; see `isStrictPublishableDeployPath`.
  */
 export function isDeployInternalPath(p: string): boolean {
   const normalized = String(p || '').toLowerCase();
@@ -64,7 +101,36 @@ export function isDeployInternalPath(p: string): boolean {
   if (normalized.endsWith('.artifact.json')) return true;
   if (normalized === 'brand-status.json' || normalized.endsWith('/brand-status.json')) return true;
   if (normalized === '_build' || normalized.startsWith('_build/') || normalized.includes('/_build/')) return true;
-  return false;
+  return !isStrictPublishableDeployPath(p);
+}
+
+/**
+ * PR-A0 hardening: API/CLI option resolution shared by routes and unit tests.
+ * Omitted preserves the legacy file set. A present value must be a boolean;
+ * anything else is rejected instead of silently falling back to legacy.
+ */
+export function resolveIncludeProjectFiles(raw: unknown): boolean {
+  if (raw === undefined) return true;
+  if (typeof raw === 'boolean') return raw;
+  throw new DeployError(
+    'invalid includeProjectFiles: expected boolean',
+    400,
+    undefined,
+    'BAD_REQUEST',
+  );
+}
+
+/**
+ * CLI `--include-files all|referenced` mapping. Returns `undefined` when the
+ * flag was omitted (server default applies). Throws on any other value so
+ * the CLI never sends a malformed option to the daemon.
+ */
+export function deployIncludeFilesFromCliFlag(raw: unknown): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const normalized = String(raw).trim().toLowerCase();
+  if (normalized === 'all') return true;
+  if (normalized === 'referenced') return false;
+  throw new Error('invalid --include-files value: "referenced" or "all" expected');
 }
 type DeployOptions = {
   metadata?: unknown;
@@ -317,7 +383,7 @@ export async function buildDeployFilePlan(projectsRoot: string, projectId: strin
     })),
   ];
 
-  const { missing, invalid, conflictSites } = await walkReferencedFiles(seeds, {
+  const { missing, invalid, excluded, conflictSites } = await walkReferencedFiles(seeds, {
     projectsRoot,
     projectId,
     metadata: options.metadata,
@@ -342,6 +408,7 @@ export async function buildDeployFilePlan(projectsRoot: string, projectId: strin
     files: Array.from(files.values()),
     missing,
     invalid,
+    excluded,
     indexConflict: conflictSites.length
       ? await entryIndexConflictFor(entryPath, conflictSites, { projectsRoot, projectId, metadata: options.metadata })
       : null,
@@ -403,6 +470,8 @@ async function walkReferencedFiles(
   const parsedScriptContexts = new Map<string, Set<string>>();
   const missing: string[] = [];
   const invalid: string[] = [];
+  const excluded: string[] = [];
+  const excludedSeen = new Set<string>();
   const conflictSites: PendingReference[] = [];
   const pending = [...seeds];
   let rootIndex: Promise<'missing' | 'entry' | 'other'> | null = null;
@@ -437,11 +506,18 @@ async function walkReferencedFiles(
     if (visited.has(visitKey)) continue;
     visited.add(visitKey);
 
-    // PR-A0 strict mode: internal paths are never published, even when the
-    // entry (or one of its dependencies) references them. The link stays in
-    // the HTML but resolves to nothing on the deployed site instead of
-    // leaking the file. Default (legacy) mode is untouched.
-    if (ctx.excludeInternalRefs && isDeployInternalPath(safePath)) {
+    // PR-A0 hardening (REVIEW FIX): strict allowlist. A referenced file
+    // ships ONLY when `isStrictPublishableDeployPath` accepts it. Anything
+    // else is recorded in `excluded` and never read: markdown audits, JSON
+    // status/data, sources, _build trees, experimental payloads. The deploy
+    // then refuses to continue (fail-closed); the preflight surfaces the
+    // same list so the author fixes the link instead of shipping a leak.
+    // Default (legacy) mode is untouched.
+    if (ctx.excludeInternalRefs && !isStrictPublishableDeployPath(safePath)) {
+      if (!excludedSeen.has(safePath)) {
+        excludedSeen.add(safePath);
+        excluded.push(safePath);
+      }
       continue;
     }
 
@@ -501,7 +577,7 @@ async function walkReferencedFiles(
       : cssReferenceSites(text, '', 1).map((site) => ({ ...site, base: dir, from: safePath }))));
   }
 
-  return { missing, invalid, conflictSites };
+  return { missing, invalid, excluded, conflictSites };
 }
 
 /** References an HTML document loads, including literal runtime image data. */
@@ -631,6 +707,19 @@ export async function buildDeployFileSet(projectsRoot: string, projectId: string
   if (plan.indexConflict) {
     const { message, data } = entryIndexConflictError(plan.indexConflict, 'deploy');
     throw new DeployError(message, 409, data, 'ENTRY_INDEX_CONFLICT');
+  }
+  // PR-A0 hardening (REVIEW FIX, fail-closed): a deploy that declares itself
+  // secure must never continue with unauthorized resources. The author
+  // removes the link (or moves the file into the allowlist) and retries;
+  // the preflight reports the identical list so nothing is discovered at
+  // deploy time that the preflight did not show.
+  if (plan.excluded.length) {
+    throw new DeployError(
+      `Strict publish refused ${plan.excluded.length} non-publishable reference(s): ${plan.excluded.join(', ')}. Remove the reference or publish with includeProjectFiles:true.`,
+      400,
+      { excluded: plan.excluded },
+      'EXCLUDED_REFERENCES',
+    );
   }
   if (plan.missing.length || plan.invalid.length) {
     const parts = [];
@@ -1825,6 +1914,21 @@ function formatMib(bytes: number) {
 export async function prepareDeployPreflight(projectsRoot: string, projectId: string, entryName: string, options: DeployOptions = {}) {
   const plan = await buildDeployFilePlan(projectsRoot, projectId, entryName, options);
   const { warnings, totalBytes, totalFiles } = analyzeDeployPlan(plan);
+  // Surface the fail-closed list with the same resolver the deploy uses, so
+  // preflight and deploy can never disagree about what is publishable.
+  {
+    const seen = new Set((warnings as JsonObject[]).map((w) => `${String(w.code)}:${String(w.path ?? '')}`));
+    for (const ref of plan.excluded) {
+      const key = `excluded-reference:${ref}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      (warnings as JsonObject[]).push({
+        code: 'excluded-reference',
+        path: ref,
+        message: `Reference is not publishable in strict mode and will refuse the deploy: ${ref}`,
+      });
+    }
+  }
   return {
     providerId: options.providerId || VERCEL_PROVIDER_ID,
     entry: plan.entryPath,
@@ -1834,6 +1938,7 @@ export async function prepareDeployPreflight(projectsRoot: string, projectId: st
       mime: f.contentType || 'application/octet-stream',
       sourcePath: f.sourcePath,
     })),
+    excluded: plan.excluded,
     totalFiles,
     totalBytes,
     warnings,

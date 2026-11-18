@@ -1190,6 +1190,7 @@ import {
   prepareDeployPreflight,
   publicDeployConfigForProvider,
   readDeployConfig,
+  resolveIncludeProjectFiles,
   VERCEL_PROVIDER_ID,
   writeDeployConfig,
 } from './deploy.js';
@@ -9146,6 +9147,7 @@ export async function startServer({
     checkDeploymentUrl,
     deployToCloudflarePages,
     deployToVercel,
+    resolveIncludeProjectFiles,
     upsertDeployment,
     publicDeployment,
     cloudflarePagesDeploymentMetadata,

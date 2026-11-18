@@ -1006,6 +1006,7 @@ export interface CheckDeploymentLinkResponse extends DeploymentInfo {}
 export type DeployPreflightWarningCode =
   | 'broken-reference'
   | 'invalid-reference'
+  | 'excluded-reference'
   | 'large-asset'
   | 'large-bundle'
   | 'large-html'
@@ -1041,6 +1042,8 @@ export interface DeployPreflightResponse {
   providerId: DeployProviderId;
   entry: string;
   files: DeployPreflightFile[];
+  /** Strict-mode references refused by the publish allowlist (fail-closed). */
+  excluded: string[];
   totalFiles: number;
   totalBytes: number;
   warnings: DeployPreflightWarning[];

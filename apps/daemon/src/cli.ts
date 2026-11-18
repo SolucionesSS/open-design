@@ -9,6 +9,7 @@ import { runResource } from './resource-cli.js';
 import { runProjectHandoff } from './handoff-cli.js';
 import { runConnectorsToolCli } from './tools-connectors-cli.js';
 import { runDesignSystemsToolCli } from './tools-design-systems-cli.js';
+import { deployIncludeFilesFromCliFlag } from './deploy.js';
 import { DESIGN_SYSTEMS_USAGE, isDesignSystemsHelpArg } from './cli-help/index.js';
 import { BRAND_USAGE, isBrandHelpArg } from './cli-help/index.js';
 import { parseDesignSystemRenameArgs } from './design-systems/rename-args.js';
@@ -12974,14 +12975,18 @@ Options:
     body.target = targetRaw;
   }
 
-  // PR-A0: per-deployment strict publish. Omitted preserves legacy behavior.
-  const includeFilesRaw = typeof flags['include-files'] === 'string' ? flags['include-files'].trim().toLowerCase() : undefined;
+  // PR-A0 hardening: single source of truth with deployIncludeFilesFromCliFlag
+  // (unit-tested in deploy-a0-secure-publish.test.ts). Omitted preserves
+  // the legacy server default.
+  const includeFilesRaw = typeof flags['include-files'] === 'string' ? flags['include-files'] : undefined;
   if (includeFilesRaw !== undefined) {
-    if (includeFilesRaw !== 'all' && includeFilesRaw !== 'referenced') {
+    try {
+      const resolved = deployIncludeFilesFromCliFlag(includeFilesRaw);
+      if (resolved !== undefined) body.includeProjectFiles = resolved;
+    } catch {
       console.error('invalid --include-files value: "referenced" or "all" expected');
       process.exit(2);
     }
-    body.includeProjectFiles = includeFilesRaw === 'all';
   }
 
   // Include cloudflarePages object only when at least one CF flag is present
