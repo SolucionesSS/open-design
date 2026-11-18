@@ -297,7 +297,7 @@ const TEMPLATES_BOOLEAN_FLAGS = new Set(['help', 'h', 'json']);
 const DEPLOY_STRING_FLAGS = new Set([
   'daemon-url', 'file', 'provider', 'target',
   'cf-zone-id', 'cf-zone-name', 'cf-domain-prefix',
-  'workspace', 'workspace-member',
+  'workspace', 'workspace-member', 'include-files',
 ]);
 const DEPLOY_BOOLEAN_FLAGS = new Set(['help', 'h', 'json']);
 // `od automation …` mirrors the Automations tab. Same surface, same
@@ -12933,6 +12933,7 @@ Required:
 Options:
   --provider vercel-self|cloudflare-pages   Deploy provider (default: vercel-self).
   --target preview|production               Deployment target (default: server decides).
+  --include-files all|referenced            Publish all visible files (default) or only the entry reference closure minus internal paths.
   --cf-zone-id <id>                         Cloudflare Pages: zone id.
   --cf-zone-name <name>                     Cloudflare Pages: zone name.
   --cf-domain-prefix <prefix>               Cloudflare Pages: domain prefix.
@@ -12971,6 +12972,16 @@ Options:
   // Only include target when explicitly supplied
   if (targetRaw !== undefined) {
     body.target = targetRaw;
+  }
+
+  // PR-A0: per-deployment strict publish. Omitted preserves legacy behavior.
+  const includeFilesRaw = typeof flags['include-files'] === 'string' ? flags['include-files'].trim().toLowerCase() : undefined;
+  if (includeFilesRaw !== undefined) {
+    if (includeFilesRaw !== 'all' && includeFilesRaw !== 'referenced') {
+      console.error('invalid --include-files value: "referenced" or "all" expected');
+      process.exit(2);
+    }
+    body.includeProjectFiles = includeFilesRaw === 'all';
   }
 
   // Include cloudflarePages object only when at least one CF flag is present

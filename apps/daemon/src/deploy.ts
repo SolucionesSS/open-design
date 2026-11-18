@@ -49,10 +49,34 @@ type PendingReference = ReferenceSite & { base: string; from: string; documentBa
 const PUBLISHED_ENTRY_PATH = 'index.html';
 const isHtmlPath = (p: string) => /\.html?$/i.test(p);
 const isJavaScriptPath = (p: string) => /\.(?:js|mjs|cjs)$/i.test(p);
+
+/**
+ * PR-A0: paths that must never ship when a deploy opts into strict mode
+ * (`includeProjectFiles: false`). Covers the internal surfaces observed on
+ * `design.solucionesss.com` (ESTADO.md, brand-status.json, *.md audits and
+ * notes, generated `_build/` trees) while leaving every referenced public
+ * asset (html/css/js/images/fonts) publishable. Pure and unit-tested.
+ */
+export function isDeployInternalPath(p: string): boolean {
+  const normalized = String(p || '').toLowerCase();
+  if (!normalized || normalized.startsWith('.') || normalized.includes('/.')) return true;
+  if (normalized.endsWith('.md')) return true;
+  if (normalized.endsWith('.artifact.json')) return true;
+  if (normalized === 'brand-status.json' || normalized.endsWith('/brand-status.json')) return true;
+  if (normalized === '_build' || normalized.startsWith('_build/') || normalized.includes('/_build/')) return true;
+  return false;
+}
 type DeployOptions = {
   metadata?: unknown;
   hookScriptUrl?: string;
   providerId?: DeployProviderId;
+  /**
+   * PR-A0: legacy default `true` preserves the exact pre-A0 file set
+   * (reference closure + every visible project file). Passing `false`
+   * publishes only the entry's reference closure and additionally drops
+   * internal paths (see `isDeployInternalPath`) even when referenced,
+   * so a link to ESTADO.md can never pull it into the artifact.
+   */
   includeProjectFiles?: boolean;
   /** Share URLs are mounted below a slug, unlike standalone deployment roots. */
   assetUrlPolicy?: 'share-relative';
@@ -301,6 +325,7 @@ export async function buildDeployFilePlan(projectsRoot: string, projectId: strin
     entryRealPath: entry.path,
     shareRewrite: Boolean(options.assetUrlPolicy),
     files,
+    excludeInternalRefs: options.includeProjectFiles === false,
   });
 
   if (options.includeProjectFiles) {
@@ -368,6 +393,7 @@ async function walkReferencedFiles(
     entryRealPath: string;
     shareRewrite: boolean;
     files: Map<string, DeployFile>;
+    excludeInternalRefs?: boolean;
   },
 ) {
   const { entryPath, files } = ctx;
@@ -410,6 +436,14 @@ async function walkReferencedFiles(
     const visitKey = ctx.shareRewrite && isJavaScriptPath(safePath) ? `${safePath}\0${documentBase}` : safePath;
     if (visited.has(visitKey)) continue;
     visited.add(visitKey);
+
+    // PR-A0 strict mode: internal paths are never published, even when the
+    // entry (or one of its dependencies) references them. The link stays in
+    // the HTML but resolves to nothing on the deployed site instead of
+    // leaking the file. Default (legacy) mode is untouched.
+    if (ctx.excludeInternalRefs && isDeployInternalPath(safePath)) {
+      continue;
+    }
 
     let projectFile;
     try {

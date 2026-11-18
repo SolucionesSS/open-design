@@ -144,11 +144,15 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
       )) return;
 
       const prior = getDeployment(db, req.params.id, fileName, providerId);
+      // PR-A0: per-deployment opt-in. Omitted/true preserves the legacy
+      // file set exactly; explicit false publishes only the strict
+      // reference closure (see isDeployInternalPath).
+      const includeProjectFiles = req.body?.includeProjectFiles !== false;
       const files = await buildDeployFileSet(
         PROJECTS_DIR,
         req.params.id,
         fileName,
-        { metadata: deployProject?.metadata, includeProjectFiles: true },
+        { metadata: deployProject?.metadata, includeProjectFiles },
       );
       const project = getProject(db, req.params.id);
       stage = 'provider';
@@ -246,7 +250,7 @@ export function registerDeployRoutes(app: Express, ctx: RegisterDeployRoutesDeps
         PROJECTS_DIR,
         req.params.id,
         fileName,
-        { metadata: preflightProject?.metadata, providerId, includeProjectFiles: true },
+        { metadata: preflightProject?.metadata, providerId, includeProjectFiles: req.body?.includeProjectFiles !== false },
       );
       res.json(body);
     } catch (err: any) {

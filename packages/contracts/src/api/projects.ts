@@ -987,6 +987,12 @@ export interface DeployProjectFileRequest {
   providerId?: DeployProviderId;
   cloudflarePages?: CloudflarePagesDeploySelection;
   target?: 'preview' | 'production';
+  /**
+   * PR-A0: opt-in strict publish. `false` publishes only the entry's
+   * reference closure minus internal paths. Omitted/`true` preserves the
+   * legacy file set (closure + visible project files).
+   */
+  includeProjectFiles?: boolean;
 }
 
 export interface DeployProjectFileResponse extends DeploymentInfo {}
@@ -1028,6 +1034,7 @@ export interface DeployPreflightFile {
 export interface DeployPreflightRequest {
   fileName: string;
   providerId?: DeployProviderId;
+  includeProjectFiles?: boolean;
 }
 
 export interface DeployPreflightResponse {
