@@ -106,22 +106,44 @@ export type DeployPolicy = {
   allow: Set<string>;
 };
 
+/**
+ * FINAL FIX: explicit read outcome. `absent` (regular project, no file)
+ * keeps the legacy behavior; `incompatible` (linked-folder project, where
+ * dot segments are hidden by design) also keeps legacy but is reported
+ * distinctly so reviewers never confuse "no policy" with "cannot read".
+ * Any other read failure on a regular project fails closed instead of
+ * degrading to legacy: a protected project that cannot prove its policy
+ * does not publish.
+ */
+export type DeployPolicyRead =
+  | { status: 'absent' }
+  | { status: 'incompatible'; reason: 'linked-folder' }
+  | { status: 'present'; policy: DeployPolicy };
+
 export async function readDeployPolicy(
   projectsRoot: string,
   projectId: string,
   metadata: unknown,
-): Promise<DeployPolicy | null> {
+): Promise<DeployPolicyRead> {
+  const linked =
+    Boolean(metadata && typeof metadata === 'object' && typeof (metadata as { baseDir?: unknown }).baseDir === 'string');
   let raw: Buffer;
   try {
     const file = await readProjectFile(projectsRoot, projectId, DEPLOY_POLICY_FILENAME, metadata);
     raw = file.buffer;
   } catch (err) {
-    // No policy file: nothing to enforce. Imported (linked-folder)
-    // projects hide dot segments by design, so a policy simply cannot
-    // exist there — same outcome, no behavior change for those projects.
-    if (isErrnoException(err) && err.code === 'ENOENT') return null;
-    if (err instanceof Error && /hidden path segments|not accessible/.test(err.message)) return null;
-    throw err;
+    if (isErrnoException(err) && err.code === 'ENOENT' && !linked) return { status: 'absent' };
+    // Linked-folder projects hide dot segments by design: the policy
+    // mechanism explicitly does not apply there (legacy preserved).
+    if (linked) return { status: 'incompatible', reason: 'linked-folder' };
+    // Regular project, unreadable file (EACCES, EISDIR, unexpected hidden
+    // rejection…): fail closed. Never degrade to legacy.
+    throw new DeployError(
+      `Invalid deploy policy: ${DEPLOY_POLICY_FILENAME} cannot be read.`,
+      400,
+      undefined,
+      'INVALID_DEPLOY_POLICY',
+    );
   }
   let parsed: unknown;
   try {
@@ -156,7 +178,7 @@ export async function readDeployPolicy(
     const allowSet = new Set(allow.map((a) => validateProjectPath(String(a))));
     // The policy file itself is never publishable, even if listed.
     allowSet.delete(DEPLOY_POLICY_FILENAME);
-    return { entries: entrySet, allow: allowSet };
+    return { status: 'present' as const, policy: { entries: entrySet, allow: allowSet } };
   } catch {
     throw new DeployError(
       `Invalid deploy policy: entries/allow must be valid project paths.`,
@@ -472,12 +494,23 @@ export async function buildDeployFilePlan(projectsRoot: string, projectId: strin
     })),
   ];
 
-  // FINAL REVIEW FIX: a project policy pins its official entries to an
-  // exact publish set. The policy wins over the request flag so the
-  // official deployment never depends on remembering `false`, and other
-  // projects without a policy keep the legacy default untouched.
-  const policy = await readDeployPolicy(projectsRoot, projectId, options.metadata);
-  const pinnedAllow = policy && policy.entries.has(entryPath) ? policy.allow : null;
+  // FINAL FIX: a project policy pins its official entries to an exact
+  // publish set. The policy wins over the request flag so the official
+  // deployment never depends on remembering `false`, and projects without
+  // a policy keep the legacy default untouched. A valid policy also
+  // closes the alternative-entry bypass: any entry NOT listed in
+  // `entries` is refused here, identically for preflight and deploy
+  // (both flow through this plan).
+  const policyRead = await readDeployPolicy(projectsRoot, projectId, options.metadata);
+  if (policyRead.status === 'present' && !policyRead.policy.entries.has(entryPath)) {
+    throw new DeployError(
+      `Entry "${entryPath}" is not listed in the project's deploy policy (${DEPLOY_POLICY_FILENAME}) entries. Only policy-listed entries may be published from this project.`,
+      400,
+      { entryPath },
+      'POLICY_ENTRY_NOT_ALLOWED',
+    );
+  }
+  const pinnedAllow = policyRead.status === 'present' ? policyRead.policy.allow : null;
   const strictRefs = options.includeProjectFiles === false || pinnedAllow !== null;
 
   const { missing, invalid, excluded, conflictSites } = await walkReferencedFiles(seeds, {

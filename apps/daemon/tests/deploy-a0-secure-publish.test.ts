@@ -310,6 +310,7 @@ describe('INTEGRATION (HTTP): one temp-data-root daemon for all HTTP cases', () 
     await writeFile(path.join(projDir, 'g/s.css'), 'body{}');
     await writeFile(path.join(projDir, 'g/leak.json'), '{}');
     await writeFile(path.join(projDir, 'ESTADO.md'), '# internal');
+    await writeFile(path.join(projDir, 'other.html'), '<!doctype html><h1>deck</h1>');
     await writeFile(
       path.join(projDir, DEPLOY_POLICY_FILENAME),
       JSON.stringify({ version: 1, entries: [entry], allow: ['g/a.svg', 'g/s.css'] }),
@@ -347,6 +348,19 @@ describe('INTEGRATION (HTTP): one temp-data-root daemon for all HTTP cases', () 
     const deployExcluded: string[] =
       deployBody.details?.excluded ?? deployBody.error?.details?.excluded ?? deployBody.excluded ?? [];
     expect([...deployExcluded].sort()).toEqual([...preflight.excluded].sort());
+
+    // 3. Alternative-entry bypass closed over HTTP too: an entry not
+    // listed in the policy is refused identically by preflight and
+    // deploy, even with an explicit legacy flag.
+    for (const route of ['deploy/preflight', 'deploy'] as const) {
+      const altResp = await fetch(`${baseUrl}/api/projects/${projectId}/${route}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: 'other.html', includeProjectFiles: true }),
+      });
+      expect(altResp.status).toBe(400);
+      expect(await altResp.text()).toContain('POLICY_ENTRY_NOT_ALLOWED');
+    }
   }, 180000);
 
   it('CLI advertises --include-files (real --help subprocess, no deploy)', async () => {
@@ -375,10 +389,32 @@ describe('UNIT: project deploy policy (.deploy-policy.json)', () => {
     return s;
   }
 
-  it('returns null when the project has no policy file', async () => {
+  it('returns absent when the project has no policy file', async () => {
     const s = await setupProject({ 'index.html': '<!doctype html>' });
     root = s.root;
-    await expect(readDeployPolicy(s.projectsRoot, s.projectId, undefined)).resolves.toBe(null);
+    await expect(readDeployPolicy(s.projectsRoot, s.projectId, undefined)).resolves.toEqual({ status: 'absent' });
+  });
+
+  it('reports linked-folder projects as explicitly incompatible', async () => {
+    const s = await setupProject({ 'index.html': '<!doctype html>' });
+    root = s.root;
+    await expect(
+      readDeployPolicy(s.projectsRoot, s.projectId, { baseDir: '/tmp/elsewhere' }),
+    ).resolves.toEqual({ status: 'incompatible', reason: 'linked-folder' });
+  });
+
+  it('fails closed when a protected project policy cannot be read', async () => {
+    const s = await setupProject({ 'index.html': '<!doctype html><body></body></html>' });
+    root = s.root;
+    // A directory where the policy file should be: unreadable as a file.
+    await mkdir(path.join(s.dir, DEPLOY_POLICY_FILENAME), { recursive: true });
+    await expect(readDeployPolicy(s.projectsRoot, s.projectId, undefined)).rejects.toMatchObject({
+      code: 'INVALID_DEPLOY_POLICY',
+    });
+    // And the plan refuses to publish from the protected project.
+    await expect(
+      buildDeployFilePlan(s.projectsRoot, s.projectId, 'index.html', { includeProjectFiles: false }),
+    ).rejects.toMatchObject({ code: 'INVALID_DEPLOY_POLICY' });
   });
 
   it('loads entries and allow sets, and never lets the policy file ship itself', async () => {
@@ -387,8 +423,10 @@ describe('UNIT: project deploy policy (.deploy-policy.json)', () => {
       { 'g/guia.html': '<!doctype html>' },
     );
     const loaded = await readDeployPolicy(s.projectsRoot, s.projectId, undefined);
-    expect([...loaded!.entries]).toEqual(['g/guia.html']);
-    expect([...loaded!.allow].sort()).toEqual(['g/a.svg']);
+    expect(loaded.status).toBe('present');
+    if (loaded.status !== 'present') throw new Error('expected present policy');
+    expect([...loaded.policy.entries]).toEqual(['g/guia.html']);
+    expect([...loaded.policy.allow].sort()).toEqual(['g/a.svg']);
   });
 
   it('fails closed on malformed policies (bad JSON, shape, paths)', async () => {
@@ -434,18 +472,24 @@ describe('UNIT: project deploy policy (.deploy-policy.json)', () => {
     ).rejects.toMatchObject({ code: 'EXCLUDED_REFERENCES' });
   });
 
-  it('leaves other entries and other projects on the legacy behavior', async () => {
+  it('refuses alternative entries when a policy exists (bypass closed)', async () => {
     const s = await setupPolicyProject(
       { version: 1, entries: ['g/guia.html'], allow: ['g/a.svg'] },
       {
+        'g/guia.html': '<!doctype html>',
         'other.html': '<!doctype html><h1>deck</h1>',
         'ESTADO.md': '# internal',
       },
     );
-    const plan = await buildDeployFilePlan(s.projectsRoot, s.projectId, 'other.html', {
-      includeProjectFiles: true,
-    });
-    expect(plan.policyEnforced).toBe(false);
-    expect(plan.files.map((f) => f.file)).toContain('ESTADO.md');
+    // Plan-level: identical for preflight and deploy (both build the plan).
+    await expect(
+      buildDeployFilePlan(s.projectsRoot, s.projectId, 'other.html', { includeProjectFiles: true }),
+    ).rejects.toMatchObject({ code: 'POLICY_ENTRY_NOT_ALLOWED' });
+    await expect(
+      buildDeployFilePlan(s.projectsRoot, s.projectId, 'other.html', { includeProjectFiles: false }),
+    ).rejects.toMatchObject({ code: 'POLICY_ENTRY_NOT_ALLOWED' });
+    await expect(
+      buildDeployFileSet(s.projectsRoot, s.projectId, 'other.html', { includeProjectFiles: true }),
+    ).rejects.toMatchObject({ code: 'POLICY_ENTRY_NOT_ALLOWED' });
   });
 });
