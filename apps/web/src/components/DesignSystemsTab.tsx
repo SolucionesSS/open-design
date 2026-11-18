@@ -242,10 +242,18 @@ export function DesignSystemsTab({
     workspaceIdentity: string;
     ids: ReadonlySet<string>;
     meta: ReadonlyMap<string, { canUnshare?: boolean }>;
+    /**
+     * Whether the Team index has completed at least one read for the stored
+     * identity. Before that, an empty id set means "unknown", not "shared
+     * nothing" — and a teamSynced system must not fall back to Your systems
+     * only to jump collections the moment the read lands.
+     */
+    settled: boolean;
   }>(() => ({
     workspaceIdentity,
     ids: new Set(),
     meta: new Map(),
+    settled: false,
   }));
   const teamSharedRequestGenerationRef = useRef(0);
   // Never render a previous Workspace's Team index while the next scoped read
@@ -261,6 +269,11 @@ export function DesignSystemsTab({
   const teamSharedMeta = teamSharedState.workspaceIdentity === workspaceIdentity
     ? teamSharedState.meta
     : EMPTY_TEAM_SHARED_META;
+  // The Team index counts only after it answers for THIS workspace. Until
+  // then an empty id set is indistinguishable from "hub unreachable", and
+  // teamSynced systems must not be treated as confirmed-unshared.
+  const teamIndexSettled = teamSharedState.workspaceIdentity === workspaceIdentity
+    && teamSharedState.settled;
   const resourceScopeForSystem = (system: DesignSystemSummary): TrackingWorkspaceScope =>
     system.teamSynced || teamSharedIds.has(system.id)
       ? 'team'
@@ -287,12 +300,18 @@ export function DesignSystemsTab({
   );
 
   const userSystems = useMemo(
-    () => systems.filter((system) => (
-      isUserSystem(system) &&
-      !system.teamSynced &&
-      !teamSharedIds.has(system.id)
-    )),
-    [systems, teamSharedIds],
+    () => systems.filter((system) => {
+      if (!isUserSystem(system) || teamSharedIds.has(system.id)) return false;
+      // A teamSynced system the settled index does not list is either retired
+      // (owner unshared) or unreachable (hub down) — in both cases it must
+      // stay visible under Your systems instead of vanishing from every
+      // collection. Before the first index read settles, an empty set means
+      // "unknown", so keep such systems hidden to avoid flashing them into
+      // Team for a frame.
+      if (system.teamSynced && !teamIndexSettled) return false;
+      return true;
+    }),
+    [systems, teamSharedIds, teamIndexSettled],
   );
 
   const userSearched = useMemo(
@@ -444,6 +463,7 @@ export function DesignSystemsTab({
         workspaceIdentity: workspaceIdentityCacheKey(read.context),
         ids: new Set(),
         meta: new Map(),
+        settled: false,
       });
       return;
     }
@@ -496,9 +516,12 @@ export function DesignSystemsTab({
         setTeamSharedState((prev) => (
           prev.workspaceIdentity === scopedWorkspaceIdentity &&
           setsEqual(prev.ids, next) &&
-          teamSharedMetaEqual(prev.meta, meta)
+          teamSharedMetaEqual(prev.meta, meta) &&
+          prev.settled
             ? prev
-            : { workspaceIdentity: scopedWorkspaceIdentity, ids: next, meta }
+            : {
+              workspaceIdentity: scopedWorkspaceIdentity, ids: next, meta, settled: true,
+            }
         ));
         if (shouldRefreshSystems) {
           // `/team` has already materialized this exact Workspace snapshot.
