@@ -608,4 +608,36 @@ describe('DesignSystemsTab — repeat share reads as "sync" once already team-sh
       ))).toBe(true);
     });
   });
+
+  it('falls back to Your systems for a teamSynced entry the settled Team index does not list', async () => {
+    // Hub unreachable (or retired mirror): the index answers [] while the
+    // catalog still flags the system teamSynced. It must stay visible under
+    // Your systems instead of vanishing from every collection.
+    workspaceInvalidationHarness.autoActivate = false;
+    mockFetch(true, 'user:my-ds', false);
+    renderTab([{ ...MY_SHARED_SYSTEM, teamSynced: true }]);
+
+    await waitFor(() => expect(teamReadHeaders).toHaveLength(1));
+    expect(await screen.findByTestId('design-kit-view-user:my-ds')).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Your systems/i }).textContent).toContain('1');
+  });
+
+  it('keeps a teamSynced entry out of Your systems until the Team index first settles', async () => {
+    // No flash of a system that the index is about to claim: while the first
+    // Team-index read is still in flight, a teamSynced entry renders nowhere.
+    workspaceInvalidationHarness.autoActivate = false;
+    const gate = deferred<Response>();
+    let reads = 0;
+    globalThis.fetch = vi.fn(async () => {
+      reads += 1;
+      return gate.promise;
+    }) as typeof fetch;
+    renderTab([{ ...MY_SHARED_SYSTEM, teamSynced: true }]);
+    await waitFor(() => expect(reads).toBe(1));
+
+    expect(screen.queryByTestId('design-kit-view-user:my-ds')).toBeNull();
+
+    gate.resolve(jsonResponse({ ids: [], resources: [] }));
+    expect(await screen.findByTestId('design-kit-view-user:my-ds')).toBeTruthy();
+  });
 });
