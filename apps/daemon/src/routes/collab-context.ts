@@ -244,7 +244,21 @@ const ASSIGNABLE_ROLES = new Set<WorkspaceInviteRole>(['admin', 'member']);
  * Enrichment may add billing and display metadata, but it must not rewrite the
  * exact Workspace authority already proven by the membership directory.
  */
-function enrichVerifiedWorkspaceContext(
+/**
+ * A verified display name, or null when there is none to keep. A name that
+ * merely repeats the id is a local/dev placeholder, not a name: callers must
+ * fall back to directory/persisted labels instead of rendering it.
+ */
+export function verifiedWorkspaceNameOrNull(
+  verified: Pick<WorkspaceCollabContext, 'workspaceId' | 'workspaceName'>,
+): string | null {
+  const name = verified.workspaceName?.trim();
+  if (!name || name === verified.workspaceId.trim()) return null;
+  return name;
+}
+
+/** Test seam: unit-test the id-placeholder rule without booting the route. */
+export function enrichVerifiedWorkspaceContext(
   verified: WorkspaceCollabContext,
   enriched: WorkspaceCollabContext | null | undefined,
 ): WorkspaceCollabContext {
@@ -256,10 +270,13 @@ function enrichVerifiedWorkspaceContext(
     return verified;
   }
   const { teamId: _enrichedTeamId, ...enrichedMetadata } = enriched;
+  // An id-valued "name" is a local/dev placeholder: the enriched
+  // (directory-backed) name must survive instead of being clobbered.
+  const verifiedName = verifiedWorkspaceNameOrNull(verified);
   return {
     ...enrichedMetadata,
     // Directory display metadata belongs to the same freshly verified membership.
-    ...(verified.workspaceName ? { workspaceName: verified.workspaceName } : {}),
+    ...(verifiedName ? { workspaceName: verifiedName } : {}),
     ...(verified.teamName ? { teamName: verified.teamName } : {}),
     ...(verified.memberCount !== undefined ? { memberCount: verified.memberCount } : {}),
     workspaceId: verified.workspaceId,

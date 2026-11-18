@@ -152,6 +152,7 @@ import {
   beginWorkspaceScopedRead,
   currentWorkspaceAccountGeneration,
   notifyWorkspaceContextRefresh,
+  readTabWorkspaceSelection,
   resolveBoundProjectWorkspaceContext,
   resolveCurrentWorkspaceContextReadWitness,
   useWorkspaceBillingResponse,
@@ -259,8 +260,10 @@ import {
   markProjectDisplaySnapshotsDirty,
   patchProjectDisplaySnapshots,
   projectDisplaySnapshotKey,
+  readLastProjectsSnapshot,
   readProjectDisplaySnapshot,
   removeProjectFromDisplaySnapshots,
+  writeLastProjectsSnapshot,
   writeProjectDisplaySnapshot,
 } from './state/project-display-cache';
 import { getOpenDesignHost, isOpenDesignHostAvailable, type OpenDesignHostProjectImportSuccess } from '@open-design/host';
@@ -1686,7 +1689,20 @@ function AppInner() {
       // Entering a workspace or changing account generation retires the local
       // display too. Only an exact snapshot or this scope's pending creates
       // may remain while its authoritative list is in flight.
-      setProjects(pendingProjects);
+      //
+      // Cold boot retires nothing: the in-memory snapshots are keyed by the
+      // resolved identity, which a fresh tab has not resolved yet. Paint the
+      // persisted last-good list for this tab lineage's selection (if any)
+      // while the authoritative read is in flight; the fetch below replaces
+      // it and `projectsLoading` stays true throughout.
+      const persistedSeed = readLastProjectsSnapshot(
+        readTabWorkspaceSelection(),
+        effectiveWorkspaceProjectView,
+      );
+      const seed = persistedSeed?.filter(
+        (project) => !pendingProjects.some((pending) => pending.id === project.id),
+      ) ?? [];
+      setProjects([...pendingProjects, ...seed]);
       setProjectsLoading(true);
     }
   }
@@ -1936,6 +1952,29 @@ function AppInner() {
       context: workspaceContextRef.current,
       view: request.workspaceView,
     }, visibleList);
+    // Cold-boot paint for the next fresh tab: the in-memory snapshot above is
+    // keyed by the resolved identity and cannot serve a boot that has not
+    // resolved one yet. This persists the authoritative list per tab-lineage
+    // pair so opening /drafts paints instantly while revalidating.
+    //
+    // Only identity-scoped reads persist: the headerless boot read
+    // (`scopeKey === 'local'`) is scope-gated server-side and its emptiness
+    // is not authoritative for any workspace.
+    const persistedSelection = workspaceContextRef.current;
+    if (
+      request.scopeKey !== UNRESOLVED_PROJECT_LIST_SCOPE
+      && persistedSelection?.workspaceId
+      && persistedSelection?.workspaceMemberId
+    ) {
+      writeLastProjectsSnapshot(
+        {
+          workspaceId: persistedSelection.workspaceId,
+          workspaceMemberId: persistedSelection.workspaceMemberId,
+        },
+        request.workspaceView,
+        visibleList,
+      );
+    }
     setProjects((current) => {
       const preserved = current.filter(
         (project) =>

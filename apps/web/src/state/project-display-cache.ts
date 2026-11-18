@@ -148,3 +148,114 @@ export function resetProjectDisplaySnapshots(): void {
 export function projectDisplaySnapshotCount(): number {
   return snapshots.size;
 }
+
+// ---------------------------------------------------------------------------
+// Cold-boot paint: the in-memory snapshots above are keyed by the resolved
+// Workspace identity, which does not exist yet on a fresh boot — so the grid
+// opens empty until the (network-backed) context read lands. This persists the
+// last rendered list per tab-lineage Workspace/member pair in localStorage so
+// boot can paint it instantly while revalidating.
+//
+// Safety mirrors the sessionStorage selection: reads require the tab's live
+// selection to match the stored pair. A new tab has no selection (no paint),
+// and sign-out clears the selection (no cross-account leak). Entries are
+// best-effort display data, never authorization.
+// ---------------------------------------------------------------------------
+
+const LAST_PROJECTS_STORAGE_KEY = 'od.last-projects.v1';
+const MAX_LAST_PROJECTS_ENTRIES = 10;
+const MAX_LAST_PROJECTS_PER_ENTRY = 200;
+
+interface LastProjectsEntry {
+  workspaceId: string;
+  workspaceMemberId: string;
+  updatedAt: number;
+  projects: Project[];
+}
+
+function lastProjectsStoreKey(
+  selection: { workspaceId: string; workspaceMemberId: string },
+  view: string | undefined,
+): string {
+  return JSON.stringify([selection.workspaceId, selection.workspaceMemberId, view ?? null]);
+}
+
+function readLastProjectsStore(): Record<string, LastProjectsEntry> {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(LAST_PROJECTS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, LastProjectsEntry> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const entry = value as Partial<LastProjectsEntry>;
+      if (
+        typeof entry.workspaceId !== 'string'
+        || typeof entry.workspaceMemberId !== 'string'
+        || !Array.isArray(entry.projects)
+      ) continue;
+      out[key] = {
+        workspaceId: entry.workspaceId,
+        workspaceMemberId: entry.workspaceMemberId,
+        updatedAt: typeof entry.updatedAt === 'number' ? entry.updatedAt : 0,
+        projects: entry.projects.filter(
+          (project): project is Project =>
+            Boolean(project) && typeof project === 'object' && typeof (project as Project).id === 'string',
+        ).slice(0, MAX_LAST_PROJECTS_PER_ENTRY),
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeLastProjectsStore(store: Record<string, LastProjectsEntry>): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    const entries = Object.entries(store).slice(-MAX_LAST_PROJECTS_ENTRIES);
+    localStorage.setItem(LAST_PROJECTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // Quota or privacy mode: instant paint is a progressive enhancement.
+  }
+}
+
+export function writeLastProjectsSnapshot(
+  selection: { workspaceId: string; workspaceMemberId: string },
+  view: string | undefined,
+  projects: Project[],
+): void {
+  if (!selection.workspaceId?.trim() || !selection.workspaceMemberId?.trim()) return;
+  const store = readLastProjectsStore();
+  const key = lastProjectsStoreKey(selection, view);
+  delete store[key];
+  store[key] = {
+    workspaceId: selection.workspaceId,
+    workspaceMemberId: selection.workspaceMemberId,
+    updatedAt: Date.now(),
+    projects: projects.slice(0, MAX_LAST_PROJECTS_PER_ENTRY),
+  };
+  writeLastProjectsStore(store);
+}
+
+export function readLastProjectsSnapshot(
+  selection: { workspaceId: string; workspaceMemberId: string } | null | undefined,
+  view: string | undefined,
+): Project[] | null {
+  if (!selection?.workspaceId?.trim() || !selection?.workspaceMemberId?.trim()) return null;
+  const entry = readLastProjectsStore()[lastProjectsStoreKey(selection, view)];
+  if (!entry) return null;
+  return entry.projects;
+}
+
+/** Test seam: clear the persisted map between cases. */
+export function resetLastProjectsSnapshotForTests(): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(LAST_PROJECTS_STORAGE_KEY);
+  } catch {
+    // Ignore.
+  }
+}

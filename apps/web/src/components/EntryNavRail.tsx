@@ -140,6 +140,7 @@ import {
 } from '../analytics/workspace';
 import { WorkbenchCampaignBadge } from './WorkbenchCampaignBadge';
 import { workspaceChromeAccountActionsHost } from './workspaceChromeActions';
+import { isRealWorkspaceName, lastKnownWorkspaceName } from '../collab/workspace-names';
 
 /** Gap the account menu keeps from the rail card's top edge — the same inset
  *  its left/right edges already hold (10px card padding + the card's 1px
@@ -2064,9 +2065,18 @@ export function EntryNavRail({
   // of sitting on the hardcoded fallback until the user opens this dropdown and
   // the directory read lands (recvpkuLOujgAm). The directory item stays first:
   // when it is warm it is the same value, revalidated.
+  //
+  // An id-valued `workspaceName` is a local/dev placeholder, not a name: skip
+  // it the same way a missing one is skipped, and consult the persisted
+  // last-known names before falling back to generic labels, so a cold boot
+  // shows "Soluciones SS" instead of a truncated id while reads are in flight.
+  const contextName = context && isRealWorkspaceName(context.workspaceId, context.workspaceName)
+    ? context.workspaceName!.trim()
+    : null;
   const workspaceName =
     currentWorkspaceItem?.workspaceName?.trim() ||
-    context?.workspaceName?.trim() ||
+    contextName ||
+    (context ? lastKnownWorkspaceName(context.workspaceId) : null) ||
     context?.teamName?.trim() ||
     context?.teamId ||
     (context?.workspaceType === 'personal' ? 'Personal workspace' : '') ||

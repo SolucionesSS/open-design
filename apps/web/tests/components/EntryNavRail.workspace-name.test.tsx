@@ -15,6 +15,7 @@ import type { WorkspaceCollabContext } from '@open-design/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EntryNavRail, resetWorkspaceDirectoryCache } from '../../src/components/EntryNavRail';
+import { resetWorkspaceNamesForTests, rememberWorkspaceName } from '../../src/collab/workspace-names';
 import { I18nProvider } from '../../src/i18n';
 
 const REMOTE_PERSONAL_NAME = "Ada's workspace";
@@ -81,12 +82,14 @@ function renderRail() {
 
 beforeEach(() => {
   resetWorkspaceDirectoryCache();
+  resetWorkspaceNamesForTests();
 });
 
 afterEach(() => {
   cleanup();
   globalThis.fetch = originalFetch;
   resetWorkspaceDirectoryCache();
+  resetWorkspaceNamesForTests();
   vi.restoreAllMocks();
 });
 
@@ -124,5 +127,51 @@ describe('personal workspace name in the switcher', () => {
       .getByTestId('workspace-switcher')
       .querySelector('.entry-nav-rail__team-avatar');
     expect(avatar?.textContent).toBe('A');
+  });
+
+  it('prefers the persisted last-known name over an id-valued context name', () => {
+    // The local/dev authority cannot name a workspace, so the startup context
+    // can carry the raw id as `workspaceName`. The rail must not render that
+    // placeholder while the directory is still in flight.
+    installNeverResolvingDirectoryFetch();
+    rememberWorkspaceName('ws-personal', 'Soluciones SS');
+
+    const idContext = { ...personalContext(), workspaceName: 'ws-personal' };
+    render(
+      <I18nProvider initial="en">
+        <EntryNavRail
+          view="home"
+          onViewChange={() => {}}
+          onNewProject={() => {}}
+          open
+          context={idContext}
+        />
+      </I18nProvider>,
+    );
+
+    const trigger = screen.getByTestId('workspace-switcher');
+    expect(trigger.textContent).toContain('Soluciones SS');
+    expect(trigger.textContent).not.toContain('ws-personal');
+  });
+
+  it('falls back to the generic label — never the raw id — with no name anywhere', () => {
+    installNeverResolvingDirectoryFetch();
+
+    const idContext = { ...personalContext(), workspaceName: 'ws-personal' };
+    render(
+      <I18nProvider initial="en">
+        <EntryNavRail
+          view="home"
+          onViewChange={() => {}}
+          onNewProject={() => {}}
+          open
+          context={idContext}
+        />
+      </I18nProvider>,
+    );
+
+    const trigger = screen.getByTestId('workspace-switcher');
+    expect(trigger.textContent).toContain('Personal workspace');
+    expect(trigger.textContent).not.toContain('ws-personal');
   });
 });
