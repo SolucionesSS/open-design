@@ -1245,6 +1245,57 @@ function acceptedFinalTextSchema(
 }
 
 /**
+ * Content-addressed memo for the canonicality validation of persisted final
+ * texts.
+ *
+ * Reading one strategy task re-parses its Prompt Bundle (and the Turn owned by
+ * every mapped Run) with the parser that owns the stored version. Those parsers
+ * walk the whole document and re-serialize it to prove byte identity — tens of
+ * kilobytes of XML per Run. A listing read therefore repeats the same
+ * validation for the same immutable bytes on every poll, which is where a
+ * project with a few hundred Runs spends most of its CPU.
+ *
+ * Keys are `schema\0sha256`, so an entry can never go stale: different bytes
+ * are different keys, and `parseStoredFinalText` has already re-derived and
+ * compared the row's own SHA-256 before anything is cached. Eviction is
+ * insertion-ordered and bounded; a miss simply re-parses, which is exactly the
+ * uncached behavior.
+ */
+const VALIDATED_FINAL_TEXT_CACHE_LIMIT = 1024;
+
+interface ParsedTurnIdentity {
+  taskExecutionId: string;
+  stage: string;
+  taskRunIndex: number;
+}
+
+const validatedPromptBundles = new Set<string>();
+const parsedRequestTurns = new Map<string, ParsedTurnIdentity>();
+const parsedIntentResolutionTurns = new Map<string, ParsedTurnIdentity>();
+
+function validatedFinalTextKey(identity: StrategyTaskFinalTextIdentity): string {
+  return `${identity.schema}\u0000${identity.sha256}`;
+}
+
+function rememberValidatedPromptBundle(key: string): void {
+  validatedPromptBundles.add(key);
+  if (validatedPromptBundles.size <= VALIDATED_FINAL_TEXT_CACHE_LIMIT) return;
+  const oldest = validatedPromptBundles.values().next();
+  if (!oldest.done) validatedPromptBundles.delete(oldest.value);
+}
+
+function rememberParsedTurn(
+  cache: Map<string, ParsedTurnIdentity>,
+  key: string,
+  value: ParsedTurnIdentity,
+): void {
+  cache.set(key, value);
+  if (cache.size <= VALIDATED_FINAL_TEXT_CACHE_LIMIT) return;
+  const oldest = cache.keys().next();
+  if (!oldest.done) cache.delete(oldest.value);
+}
+
+/**
  * Parse a persisted Prompt Bundle with the parser that owns its stored version.
  *
  * Each version's parser also proves the text re-serializes byte-identically, so
@@ -1253,17 +1304,18 @@ function acceptedFinalTextSchema(
  * daemon composes today.
  */
 function parseStoredPromptBundle(identity: StrategyTaskFinalTextIdentity): void {
+  const key = validatedFinalTextKey(identity);
+  if (validatedPromptBundles.has(key)) return;
   if (identity.schema === OD_NEXT_PROMPT_BUNDLE_SCHEMA_V2) {
     parseOdNextPromptBundleV2(identity.text);
-    return;
-  }
-  if (identity.schema === OD_NEXT_PROMPT_BUNDLE_SCHEMA_V1) {
+  } else if (identity.schema === OD_NEXT_PROMPT_BUNDLE_SCHEMA_V1) {
     parseOdNextPromptBundleV1(identity.text);
-    return;
+  } else {
+    throw new InvalidStrategyTaskRecordError(
+      'Persisted OD Next Prompt Bundle does not carry a Prompt Bundle schema.',
+    );
   }
-  throw new InvalidStrategyTaskRecordError(
-    'Persisted OD Next Prompt Bundle does not carry a Prompt Bundle schema.',
-  );
+  rememberValidatedPromptBundle(key);
 }
 
 /**
@@ -1362,7 +1414,17 @@ function validateMappedFinalText(
   }
   if (mapping.purpose === 'intent_resolution') {
     if (identity.kind !== 'turn' || identity.schema !== OD_NEXT_INTENT_RESOLUTION_TURN_SCHEMA) throw new InvalidStrategyTaskRecordError('Continuation strategy task Run must own a persisted request Turn.');
-    const parsed = parseOdNextIntentResolutionTurnV1(identity.text);
+    const key = validatedFinalTextKey(identity);
+    let parsed = parsedIntentResolutionTurns.get(key);
+    if (!parsed) {
+      const parsedTurn = parseOdNextIntentResolutionTurnV1(identity.text);
+      parsed = {
+        taskExecutionId: parsedTurn.taskExecutionId,
+        stage: parsedTurn.stage,
+        taskRunIndex: parsedTurn.taskRunIndex,
+      };
+      rememberParsedTurn(parsedIntentResolutionTurns, key, parsed);
+    }
     if (parsed.taskExecutionId !== mapping.taskExecutionId || parsed.stage !== mapping.inputStage || parsed.taskRunIndex !== mapping.taskRunIndex) throw new InvalidStrategyTaskRecordError('Persisted request Turn does not match its task Run mapping.');
     return;
   }
@@ -1371,7 +1433,17 @@ function validateMappedFinalText(
       'Continuation strategy task Run must own a persisted request Turn.',
     );
   }
-  const parsed = parseOdNextRequestTurnV1(identity.text);
+  const key = validatedFinalTextKey(identity);
+  let parsed = parsedRequestTurns.get(key);
+  if (!parsed) {
+    const parsedTurn = parseOdNextRequestTurnV1(identity.text);
+    parsed = {
+      taskExecutionId: parsedTurn.taskExecutionId,
+      stage: parsedTurn.stage,
+      taskRunIndex: parsedTurn.taskRunIndex,
+    };
+    rememberParsedTurn(parsedRequestTurns, key, parsed);
+  }
   if (
     parsed.taskExecutionId !== mapping.taskExecutionId
     || parsed.stage !== mapping.inputStage

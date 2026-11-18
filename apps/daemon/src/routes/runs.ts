@@ -654,7 +654,10 @@ export interface RegisterRunRoutesDeps {
     ) => Promise<boolean>;
   };
   telemetry: {
-    taskTelemetryForRun?: (runId: string) => ChatRunStatusResponse['taskTelemetry'];
+    taskTelemetryForRun?: (
+      runId: string,
+      task?: StrategyTaskExecutionRecord | null,
+    ) => ChatRunStatusResponse['taskTelemetry'];
     reportRunCompletionTelemetryFallback: (input: RunCreatedFallbackInput) => void;
     resolveRunProjectKindForAnalytics: (input: RunProjectKindInput) => string | null;
     runArtifactBaselines: RunArtifactBaselines;
@@ -1039,8 +1042,10 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
   };
   const statusWithStrategyTask = (run: ChatRun): ChatRunStatusResponse => {
     let projectedSnapshotId: string | undefined;
+    let resolvedStrategyTask: StrategyTaskExecutionRecord | null = null;
     try {
       const strategyTask = strategyTaskForRun(run, true);
+      resolvedStrategyTask = strategyTask;
       const projection = strategyTask ? projectStrategyTask(strategyTask, run.id, db) : null;
       if (projection) run.strategyTask = projection;
       if (strategyTask && isLegacyHydratedRunWithoutAppliedSnapshot(run)) {
@@ -1063,7 +1068,9 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
       }
     }
     const status = design.runs.statusBody(run);
-    const taskTelemetry = status.strategyTask ? ctx.telemetry.taskTelemetryForRun?.(run.id) : undefined;
+    const taskTelemetry = status.strategyTask
+      ? ctx.telemetry.taskTelemetryForRun?.(run.id, resolvedStrategyTask)
+      : undefined;
     if (taskTelemetry) status.taskTelemetry = taskTelemetry;
     // A read can derive display identity from the validated task, but must not
     // stamp the source Run and bypass clarification's linked-snapshot witness.
@@ -2983,6 +2990,21 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
     res.json(body);
   });
 
+  /**
+   * `GET /api/runs` answers with every Run of the requested scope and each
+   * entry carries a validated strategy-task projection, so a long project
+   * history turns one list read into megabytes of JSON and seconds of CPU.
+   * Clients that only render a recent window can ask for the newest `limit`
+   * entries; omitting the parameter keeps the response exactly as before.
+   */
+  const parseRunsListLimit = (value: unknown): number | null => {
+    const raw = Array.isArray(value) ? value.at(-1) : value;
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!/^[1-9][0-9]*$/.test(trimmed)) return null;
+    return Math.min(Number(trimmed), 1000);
+  };
+
   app.get('/api/runs', async (req: ApiRequest, res: ApiResponse) => {
     const { projectId, conversationId, status } = req.query;
     const runs = design.runs.list({ projectId, conversationId, status });
@@ -3059,8 +3081,13 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
     const awaitingInputConversationIds = visibleConversationIds.size
       ? [...listConversationsAwaitingInput(db)].filter((id) => visibleConversationIds.has(id))
       : [];
+    const limit = parseRunsListLimit(req.query.limit);
+    // Insertion order is oldest-first, so the newest window is the tail.
+    const listedRuns = limit === null || visibleRuns.length <= limit
+      ? visibleRuns
+      : visibleRuns.slice(visibleRuns.length - limit);
     const body = {
-      runs: visibleRuns.map(statusWithStrategyTask),
+      runs: listedRuns.map(statusWithStrategyTask),
       awaitingInputProjectIds,
       awaitingInputConversationIds,
     };

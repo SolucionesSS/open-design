@@ -178,7 +178,10 @@ export interface TaskObservationRolloutResult {
 export interface TaskObservationRolloutService {
   readonly config: TaskObservationRolloutConfig;
   diagnostic(): TaskObservationRolloutDiagnostic;
-  telemetryForRun(runId: string): TaskTelemetryStatus | undefined;
+  telemetryForRun(
+    runId: string,
+    taskHint?: StrategyTaskExecutionRecord | null,
+  ): TaskTelemetryStatus | undefined;
   modeForRun(runId: string): TaskObservationRolloutMode;
   representationForRun(runId: string):
     | 'single_run'
@@ -1454,9 +1457,9 @@ export function createTaskObservationRolloutService(
   return {
     config,
     diagnostic,
-    telemetryForRun(runId) {
+    telemetryForRun(runId, taskHint) {
       try {
-        const task = getStrategyTaskExecutionByRunId(options.db, runId);
+        const task = taskHint ?? getStrategyTaskExecutionByRunId(options.db, runId);
         if (!task) return undefined;
         const row = readDeliveryRow(options.db, task.taskExecutionId);
         const receipt = row ? traceReceipts.read(task.taskExecutionId, row.idempotencyKey) : undefined;

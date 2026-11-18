@@ -18232,7 +18232,7 @@ export async function startServer({
       },
     },
     telemetry: {
-      taskTelemetryForRun: (runId) => taskObservationRollout.telemetryForRun(runId),
+      taskTelemetryForRun: (runId, task) => taskObservationRollout.telemetryForRun(runId, task),
       reportRunCompletionTelemetryFallback,
       resolveRunProjectKindForAnalytics,
       runArtifactBaselines,

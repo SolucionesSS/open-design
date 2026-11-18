@@ -239,6 +239,17 @@ export const BRAND_EXTENSIONS: Readonly<Record<string, readonly string[]>> = {
     "--tm-code-panel", // #151a1d code window header
     "--tm-code-text", // #d8dee9 code syntax text
   ],
+  "sspymes-plus": [
+    "--navy", // #0b1d3a — sidebar shell, SSPyMes+ brand navy
+    "--navy-2", // #12294d — nested depth inside the navy shell
+    "--yellow", // #f2b200 — suite-symbol core, brand yellow
+    "--ok-bg", // success tint for habilitado pills
+    "--warn-bg", // warning tint for demo chips and coming-soon pills
+    "--neutral-bg", // disabled fills, icon tiles, skeleton base
+    "--red-bg", // danger tint for urgent fiscal pills
+    "--shadow-1", // whisper card shadow (resting)
+    "--shadow-2", // whisper card shadow (hover)
+  ],
 };
 
 /**

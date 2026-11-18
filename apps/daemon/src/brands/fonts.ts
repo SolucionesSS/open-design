@@ -113,10 +113,24 @@ export function parseFontFaces(css: string, baseUrl: string): FontFaceRef[] {
   return out;
 }
 
-/** True when a unicode-range covers basic latin (or none is declared). */
+/** True when a unicode-range covers the basic latin letters (or none is
+ *  declared). Google serves `latin-ext` BEFORE `latin`, and its declared range
+ *  (`U+0100-02BA, …`) does not contain A–z — a naive "contains a U+00xx token"
+ *  check matched it anyway, so the harvest kept the latin-ext subset and every
+ *  Latin label silently fell back to a system face. Compare the parsed range
+ *  bounds instead. */
 function coversLatin(range?: string): boolean {
   if (!range) return true;
-  return /u\+0(?:0|1)?[0-9a-f]{2}\b|u\+0000/i.test(range);
+  const BASIC_LATIN_MIN = 0x0041; // "A"
+  const BASIC_LATIN_MAX = 0x007a; // "z"
+  for (const part of range.split(",")) {
+    const m = /^\s*u\+([0-9a-f]{1,6})(?:-([0-9a-f]{1,6}))?\s*$/i.exec(part);
+    if (!m) continue;
+    const start = Number.parseInt(m[1], 16);
+    const end = m[2] ? Number.parseInt(m[2], 16) : start;
+    if (start <= BASIC_LATIN_MIN && end >= BASIC_LATIN_MAX) return true;
+  }
+  return false;
 }
 
 function fontMagicOk(buf: Buffer, format: string): boolean {
