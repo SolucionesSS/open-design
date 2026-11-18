@@ -1664,9 +1664,11 @@ export async function listProjectRuns(
  */
 export async function listProjectRunsWithScope(
   workspaceContext?: WorkspaceCollabContext | null,
+  options?: { hydrate?: 'none' },
 ): Promise<{ runs: ChatRunStatusResponse[]; scopeRequired: boolean }> {
   try {
-    const resp = await fetch('/api/runs', {
+    const params = options?.hydrate === 'none' ? '?hydrate=none' : '';
+    const resp = await fetch(`/api/runs${params}`, {
       ...(workspaceContext
         ? { headers: workspaceProjectHeaders(workspaceContext) }
         : {}),

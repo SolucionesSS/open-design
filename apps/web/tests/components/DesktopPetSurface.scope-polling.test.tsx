@@ -61,4 +61,11 @@ describe('DesktopPetSurface task polling', () => {
     // Initial read plus three 2s ticks; config reloads every 1.5s add nothing.
     expect(listProjectRunsWithScope).toHaveBeenCalledTimes(4);
   });
+
+  it('requests light runs without strategyTask hydration', async () => {
+    listProjectRunsWithScope.mockResolvedValue({ runs: [], scopeRequired: false });
+    render(<DesktopPetSurface />);
+    await flush();
+    expect(listProjectRunsWithScope).toHaveBeenCalledWith(undefined, { hydrate: 'none' });
+  });
 });

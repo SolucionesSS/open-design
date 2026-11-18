@@ -4583,7 +4583,7 @@ function AppInner() {
     let cancelled = false;
     let id: number | undefined;
     const refresh = async () => {
-      const { runs, scopeRequired } = await listProjectRunsWithScope();
+      const { runs, scopeRequired } = await listProjectRunsWithScope(undefined, { hydrate: 'none' });
       if (cancelled) return;
       // A deterministic PROJECT_SCOPE_REQUIRED will not change on retry.
       if (scopeRequired) window.clearInterval(id);

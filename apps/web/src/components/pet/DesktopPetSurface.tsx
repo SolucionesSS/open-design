@@ -53,7 +53,7 @@ export function DesktopPetSurface() {
     const refresh = async () => {
       const [projects, { runs, scopeRequired }] = await Promise.all([
         listProjects(),
-        listProjectRunsWithScope(),
+        listProjectRunsWithScope(undefined, { hydrate: 'none' }),
       ]);
       if (cancelled) return;
       if (scopeRequired) window.clearInterval(id);
