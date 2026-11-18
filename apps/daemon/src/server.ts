@@ -91,6 +91,7 @@ export {
 import {
   isStaticSpaFallbackRequest,
   registerStaticSpaFallback,
+  registerWebStatic,
   resolveStaticSpaFallbackPath,
 } from './static-spa.js';
 export {
@@ -3844,7 +3845,7 @@ export async function startServer({
   });
 
   if (fs.existsSync(staticDir)) {
-    app.use(express.static(staticDir));
+    registerWebStatic(app, staticDir);
   }
 
   // ---- Projects (DB-backed) -------------------------------------------------

@@ -1,4 +1,5 @@
 import type { Express } from 'express';
+import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -31,4 +32,19 @@ export function registerStaticSpaFallback(app: Express, staticDir: string): void
     if (indexPath == null) return next();
     res.sendFile('index.html', { root: staticDir });
   });
+}
+
+/**
+ * Serve the built web app. Next.js build assets under `/_next/static` carry
+ * content hashes in their filenames, so they are safe to cache immutably:
+ * without this every new tab revalidates ~30 chunks (one 304 roundtrip each)
+ * before first paint. The shell (`index.html`, icons, …) keeps the default
+ * revalidation behavior so deploys take effect immediately.
+ */
+export function registerWebStatic(app: Express, staticDir: string): void {
+  const nextStaticDir = path.join(staticDir, '_next', 'static');
+  if (fs.existsSync(nextStaticDir)) {
+    app.use('/_next/static', express.static(nextStaticDir, { maxAge: '1y', immutable: true }));
+  }
+  app.use(express.static(staticDir));
 }

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   registerStaticSpaFallback,
+  registerWebStatic,
   resolveStaticSpaFallbackPath,
 } from '../../src/static-spa.js';
 
@@ -74,5 +75,29 @@ describe('static SPA fallback', () => {
 
     expect(response.sendFile).toHaveBeenCalledWith('index.html', { root: staticDir });
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it('serves hashed build assets as immutable, everything else revalidatable', async () => {
+    const nextStaticDir = path.join(tempDir, '_next', 'static');
+    mkdirSync(nextStaticDir, { recursive: true });
+    writeFileSync(path.join(nextStaticDir, 'app.abc123.js'), 'console.log(1)');
+    const { default: express } = await import('express');
+    const { default: http } = await import('node:http');
+    const app = express();
+    registerWebStatic(app as never, tempDir);
+    const created = http.createServer(app);
+    await new Promise<void>((resolve) => created.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = created.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      const hashed = await fetch(`http://127.0.0.1:${port}/_next/static/app.abc123.js`);
+      expect(hashed.status).toBe(200);
+      expect(hashed.headers.get('cache-control')).toContain('immutable');
+      const shell = await fetch(`http://127.0.0.1:${port}/index.html`);
+      expect(shell.status).toBe(200);
+      expect(shell.headers.get('cache-control') ?? '').not.toContain('immutable');
+    } finally {
+      await new Promise<void>((resolve) => created.close(() => resolve()));
+    }
   });
 });

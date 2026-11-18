@@ -3007,6 +3007,18 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
 
   app.get('/api/runs', async (req: ApiRequest, res: ApiResponse) => {
     const { projectId, conversationId, status } = req.query;
+    // Light pollers (e.g. the pet task center, every 2s per tab) only read
+    // `status`/`projectId`/`updatedAt`. The default listing hydrates a full
+    // strategy-task projection per run (SQLite N+1 + canonical-XML bundle
+    // parse on the event loop), which starves concurrent chunk/API requests
+    // when polled hot. `?hydrate=none` skips that work and strips any
+    // lifecycle-attached projection from the in-memory run.
+    const skipStrategyTask =
+      typeof req.query?.hydrate === 'string' && req.query.hydrate === 'none';
+    const statusWithoutStrategyTask = (run: ChatRun): ChatRunStatusResponse => {
+      const { strategyTask: _omitted, ...light } = design.runs.statusBody(run);
+      return light;
+    };
     const runs = design.runs.list({ projectId, conversationId, status });
     let visibleRuns = runs;
     if (typeof projectId === 'string' && projectId) {
@@ -3087,7 +3099,7 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
       ? visibleRuns
       : visibleRuns.slice(visibleRuns.length - limit);
     const body = {
-      runs: listedRuns.map(statusWithStrategyTask),
+      runs: listedRuns.map(skipStrategyTask ? statusWithoutStrategyTask : statusWithStrategyTask),
       awaitingInputProjectIds,
       awaitingInputConversationIds,
     };
