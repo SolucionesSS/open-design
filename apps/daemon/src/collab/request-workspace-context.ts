@@ -97,3 +97,41 @@ export async function verifyWorkspaceRequestContext(input: {
     context: workspaceContextFromDirectoryItem(membership, input.configuredEnv),
   };
 }
+
+/**
+ * Local/dev authority: explicit headers are the complete static authority
+ * (no membership directory exists to verify against). Display metadata the
+ * directory would supply — notably `workspaceName` — must be OMITTED, never
+ * fabricated from the id: a placeholder id-as-name defeats every consumer's
+ * "missing name" detection (the rail would render a truncated id, and
+ * `enrichVerifiedWorkspaceContext` would keep the placeholder over Vela's
+ * real name). Callers join the real name from the directory / persisted
+ * labels instead.
+ */
+export function synthesizeLocalWorkspaceContextFromClaimed(
+  claimed: {
+    workspaceId: string;
+    workspaceType: WorkspaceCollabContext['workspaceType'];
+    workspaceMemberId: string;
+    role: WorkspaceCollabContext['role'];
+    memberStatus: WorkspaceCollabContext['memberStatus'];
+    lifecycleState: WorkspaceCollabContext['lifecycleState'];
+  },
+  configuredEnv: Record<string, string> = {},
+): WorkspaceCollabContext {
+  return workspaceContextFromDirectoryItem(
+    {
+      workspaceId: claimed.workspaceId,
+      // Unknown to this authority: the membership directory owns display
+      // names. Empty (not the id) so falsy-checks treat it as missing and
+      // enrichment / client backfill can supply the real name.
+      workspaceName: '',
+      workspaceType: claimed.workspaceType,
+      workspaceMemberId: claimed.workspaceMemberId,
+      role: claimed.role,
+      memberStatus: claimed.memberStatus,
+      lifecycleState: claimed.lifecycleState,
+    },
+    configuredEnv,
+  );
+}

@@ -995,7 +995,7 @@ import {
   velaWorkspaceDirectoryIdentityForSession,
   workspaceContextFromDirectoryItem,
 } from './collab/vela-workspace-context.js';
-import { verifyWorkspaceRequestContext } from './collab/request-workspace-context.js';
+import { synthesizeLocalWorkspaceContextFromClaimed, verifyWorkspaceRequestContext } from './collab/request-workspace-context.js';
 import {
   createWorkspaceBillingRuntimeCoordinator,
   shouldEmitWorkspaceBillingRuntimeNudge,
@@ -4050,15 +4050,7 @@ export async function startServer({
     }
     return {
       ok: true as const,
-      context: workspaceContextFromDirectoryItem({
-        workspaceId: claimed.workspaceId,
-        workspaceName: claimed.workspaceId,
-        workspaceType: claimed.workspaceType,
-        workspaceMemberId: claimed.workspaceMemberId,
-        role: claimed.role,
-        memberStatus: claimed.memberStatus,
-        lifecycleState: claimed.lifecycleState,
-      }, configuredAmrEnv()),
+      context: synthesizeLocalWorkspaceContextFromClaimed(claimed, configuredAmrEnv()),
     };
   };
   const verifyWorkspaceReadAuthority = (req: unknown) =>

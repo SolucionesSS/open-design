@@ -1,4 +1,5 @@
 import { clearWorkspaceRemoval, currentWorkspaceRemoval, recordWorkspaceRemoval } from './workspace-removal';
+import { isRealWorkspaceName, lastKnownWorkspaceName, rememberWorkspaceName } from './workspace-names';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   TeamProject,
@@ -309,6 +310,9 @@ function billingStateFromLifecycle(
 export function workspaceContextFromDirectoryItem(
   item: WorkspaceDirectoryItem,
 ): WorkspaceCollabContext {
+  // Feed the persisted name map: the next cold boot can label this workspace
+  // before any network read lands. Refusals (empty/id-valued) are no-ops.
+  rememberWorkspaceName(item.workspaceId, item.workspaceName);
   const context: WorkspaceCollabContext = {
     workspaceId: item.workspaceId,
     workspaceType: item.workspaceType,
@@ -495,6 +499,11 @@ function readWorkspaceSelectionResult(): WorkspaceSelectionRead {
 
 function readWorkspaceSelection(): WorkspaceSelection | null {
   return readWorkspaceSelectionResult().selection;
+}
+
+/** This tab's live Workspace/member selection, if the tab ever established one. */
+export function readTabWorkspaceSelection(): WorkspaceSelection | null {
+  return readWorkspaceSelection();
 }
 
 function writeWorkspaceSelection(selection: WorkspaceSelection | null): void {
@@ -814,12 +823,14 @@ export function useWorkspaceContext(): WorkspaceContextState {
         ) {
           throw new Error('workspace-context identity mismatch');
         }
-        if (!body.context || body.context.workspaceName?.trim()) return body;
-        // Older Vela context payloads predate `workspaceName`, while the
-        // membership directory already carries it. Reuse the name from the
-        // exact Workspace/member row selected for THIS tab so label consumers
-        // (including plugin context defaults) remain compatible. This is display
-        // metadata only: authority still comes from the explicit ids above.
+        if (!body.context || isRealWorkspaceName(selected.workspaceId, body.context.workspaceName)) return body;
+        // Older Vela context payloads predate `workspaceName`, and the
+        // local/dev authority never has one (it must not fabricate it from
+        // the id) — while the membership directory already carries it. Reuse
+        // the name from the exact Workspace/member row selected for THIS tab
+        // so label consumers (including plugin context defaults) remain
+        // compatible. This is display metadata only: authority still comes
+        // from the explicit ids above.
         // The daemon's saved workspace id is only a cold-start preference used
         // to choose this exact directory row.
         const workspaceName = typeof selected.workspaceName === 'string'
