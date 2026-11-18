@@ -1044,6 +1044,12 @@ export interface DeployPreflightResponse {
   files: DeployPreflightFile[];
   /** Strict-mode references refused by the publish allowlist (fail-closed). */
   excluded: string[];
+  /**
+   * Project deploy-policy signal. Non-null with enforced:true means the
+   * project's `.deploy-policy.json` pinned this preflight to its exact
+   * publish set regardless of the requested `includeProjectFiles`.
+   */
+  policy: { enforced: boolean } | null;
   totalFiles: number;
   totalBytes: number;
   warnings: DeployPreflightWarning[];

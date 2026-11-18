@@ -39,6 +39,8 @@ type DeployFilePlan = {
   invalid: string[];
   /** Strict-mode references refused by the publish allowlist (see below). */
   excluded: string[];
+  /** True when a project deploy policy pinned this plan to its exact set. */
+  policyEnforced: boolean;
   /** Set when a walked reference resolves to the root index.html the entry is published as. */
   indexConflict: EntryIndexConflict | null;
 };
@@ -77,6 +79,93 @@ const STRICT_PUBLISHABLE_EXTENSIONS = new Set([
   'woff', 'woff2', 'ttf', 'otf', 'eot',
   'mp4', 'webm', 'ogg', 'mp3', 'wav', 'pdf',
 ]);
+
+/**
+ * FINAL REVIEW FIX: per-project publish policy.
+ *
+ * The official `design.solucionesss.com` deployment must never depend on
+ * remembering `includeProjectFiles:false`. A project declares its own
+ * policy in `.deploy-policy.json` (dotfile: never listed, never shipped):
+ *
+ *   { "version": 1,
+ *     "entries": ["paginas-principales/guia-marca-editorial.html"],
+ *     "allow": ["paginas-principales/style.css", "assets/logo.svg"] }
+ *
+ * When the deployed entry matches `entries`, the exact `allow` set is
+ * enforced no matter what the caller passes — the extension allowlist is
+ * then only the backstop for strict-mode projects WITHOUT a policy, never
+ * an authorization of "any referenced html/svg/pdf". Anything referenced
+ * outside `allow` lands in `excluded` and fails the deploy closed.
+ * Malformed policies fail closed too (400), so a typo can never silently
+ * widen a publication.
+ */
+export const DEPLOY_POLICY_FILENAME = '.deploy-policy.json';
+
+export type DeployPolicy = {
+  entries: Set<string>;
+  allow: Set<string>;
+};
+
+export async function readDeployPolicy(
+  projectsRoot: string,
+  projectId: string,
+  metadata: unknown,
+): Promise<DeployPolicy | null> {
+  let raw: Buffer;
+  try {
+    const file = await readProjectFile(projectsRoot, projectId, DEPLOY_POLICY_FILENAME, metadata);
+    raw = file.buffer;
+  } catch (err) {
+    // No policy file: nothing to enforce. Imported (linked-folder)
+    // projects hide dot segments by design, so a policy simply cannot
+    // exist there — same outcome, no behavior change for those projects.
+    if (isErrnoException(err) && err.code === 'ENOENT') return null;
+    if (err instanceof Error && /hidden path segments|not accessible/.test(err.message)) return null;
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.toString('utf8'));
+  } catch {
+    throw new DeployError(
+      `Invalid deploy policy: ${DEPLOY_POLICY_FILENAME} is not valid JSON.`,
+      400,
+      undefined,
+      'INVALID_DEPLOY_POLICY',
+    );
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new DeployError(
+      `Invalid deploy policy: ${DEPLOY_POLICY_FILENAME} must be a JSON object.`,
+      400,
+      undefined,
+      'INVALID_DEPLOY_POLICY',
+    );
+  }
+  const { version, entries, allow } = parsed as { version?: unknown; entries?: unknown; allow?: unknown };
+  if (version !== 1 || !Array.isArray(entries) || entries.length === 0 || !Array.isArray(allow)) {
+    throw new DeployError(
+      `Invalid deploy policy: expected {"version":1,"entries":[...],"allow":[...]}.`,
+      400,
+      undefined,
+      'INVALID_DEPLOY_POLICY',
+    );
+  }
+  try {
+    const entrySet = new Set(entries.map((e) => validateProjectPath(String(e))));
+    const allowSet = new Set(allow.map((a) => validateProjectPath(String(a))));
+    // The policy file itself is never publishable, even if listed.
+    allowSet.delete(DEPLOY_POLICY_FILENAME);
+    return { entries: entrySet, allow: allowSet };
+  } catch {
+    throw new DeployError(
+      `Invalid deploy policy: entries/allow must be valid project paths.`,
+      400,
+      undefined,
+      'INVALID_DEPLOY_POLICY',
+    );
+  }
+}
 
 export function isStrictPublishableDeployPath(p: string): boolean {
   const normalized = String(p || '').toLowerCase();
@@ -383,6 +472,14 @@ export async function buildDeployFilePlan(projectsRoot: string, projectId: strin
     })),
   ];
 
+  // FINAL REVIEW FIX: a project policy pins its official entries to an
+  // exact publish set. The policy wins over the request flag so the
+  // official deployment never depends on remembering `false`, and other
+  // projects without a policy keep the legacy default untouched.
+  const policy = await readDeployPolicy(projectsRoot, projectId, options.metadata);
+  const pinnedAllow = policy && policy.entries.has(entryPath) ? policy.allow : null;
+  const strictRefs = options.includeProjectFiles === false || pinnedAllow !== null;
+
   const { missing, invalid, excluded, conflictSites } = await walkReferencedFiles(seeds, {
     projectsRoot,
     projectId,
@@ -391,10 +488,11 @@ export async function buildDeployFilePlan(projectsRoot: string, projectId: strin
     entryRealPath: entry.path,
     shareRewrite: Boolean(options.assetUrlPolicy),
     files,
-    excludeInternalRefs: options.includeProjectFiles === false,
+    excludeInternalRefs: strictRefs,
+    allowSet: pinnedAllow,
   });
 
-  if (options.includeProjectFiles) {
+  if (options.includeProjectFiles && pinnedAllow === null) {
     await addVisibleProjectFilesToDeployPlan(files, {
       projectsRoot,
       projectId,
@@ -409,6 +507,7 @@ export async function buildDeployFilePlan(projectsRoot: string, projectId: strin
     missing,
     invalid,
     excluded,
+    policyEnforced: pinnedAllow !== null,
     indexConflict: conflictSites.length
       ? await entryIndexConflictFor(entryPath, conflictSites, { projectsRoot, projectId, metadata: options.metadata })
       : null,
@@ -461,6 +560,12 @@ async function walkReferencedFiles(
     shareRewrite: boolean;
     files: Map<string, DeployFile>;
     excludeInternalRefs?: boolean;
+    /**
+     * FINAL REVIEW FIX: exact publish set from the project's deploy
+     * policy. When non-null, the extension allowlist is NOT consulted:
+     * only these paths may ship. `null` keeps the generic strict gate.
+     */
+    allowSet?: Set<string> | null;
   },
 ) {
   const { entryPath, files } = ctx;
@@ -506,19 +611,25 @@ async function walkReferencedFiles(
     if (visited.has(visitKey)) continue;
     visited.add(visitKey);
 
-    // PR-A0 hardening (REVIEW FIX): strict allowlist. A referenced file
-    // ships ONLY when `isStrictPublishableDeployPath` accepts it. Anything
-    // else is recorded in `excluded` and never read: markdown audits, JSON
-    // status/data, sources, _build trees, experimental payloads. The deploy
-    // then refuses to continue (fail-closed); the preflight surfaces the
-    // same list so the author fixes the link instead of shipping a leak.
-    // Default (legacy) mode is untouched.
-    if (ctx.excludeInternalRefs && !isStrictPublishableDeployPath(safePath)) {
-      if (!excludedSeen.has(safePath)) {
-        excludedSeen.add(safePath);
-        excluded.push(safePath);
+    // FINAL REVIEW FIX: exact-set allowlist. With a project policy the
+    // extension gate is not consulted at all: a referenced file ships
+    // ONLY when listed in the policy's `allow` set (the policy file
+    // itself is never publishable). Without a policy, the generic
+    // `isStrictPublishableDeployPath` gate applies. Anything else is
+    // recorded in `excluded` and never read; the deploy then refuses to
+    // continue (fail-closed) and the preflight surfaces the same list.
+    // Default (legacy, no policy) mode is untouched.
+    if (ctx.excludeInternalRefs) {
+      const publishable = ctx.allowSet !== null && ctx.allowSet !== undefined
+        ? (ctx.allowSet.has(safePath) && safePath !== DEPLOY_POLICY_FILENAME)
+        : isStrictPublishableDeployPath(safePath);
+      if (!publishable) {
+        if (!excludedSeen.has(safePath)) {
+          excludedSeen.add(safePath);
+          excluded.push(safePath);
+        }
+        continue;
       }
-      continue;
     }
 
     let projectFile;
@@ -708,14 +819,16 @@ export async function buildDeployFileSet(projectsRoot: string, projectId: string
     const { message, data } = entryIndexConflictError(plan.indexConflict, 'deploy');
     throw new DeployError(message, 409, data, 'ENTRY_INDEX_CONFLICT');
   }
-  // PR-A0 hardening (REVIEW FIX, fail-closed): a deploy that declares itself
-  // secure must never continue with unauthorized resources. The author
-  // removes the link (or moves the file into the allowlist) and retries;
-  // the preflight reports the identical list so nothing is discovered at
-  // deploy time that the preflight did not show.
+  // FINAL REVIEW FIX (fail-closed): a strict deploy must never continue
+  // with unauthorized resources. The author removes the link or records
+  // the file in the project's deploy policy allowlist
+  // (.deploy-policy.json) and retries; the preflight reports the
+  // identical list so nothing is discovered at deploy time that the
+  // preflight did not show. Reverting to an unrestricted publish is
+  // deliberately NOT offered here: it would reintroduce the leak.
   if (plan.excluded.length) {
     throw new DeployError(
-      `Strict publish refused ${plan.excluded.length} non-publishable reference(s): ${plan.excluded.join(', ')}. Remove the reference or publish with includeProjectFiles:true.`,
+      `Strict publish refused ${plan.excluded.length} non-publishable reference(s): ${plan.excluded.join(', ')}. Remove the reference or add it to the project's deploy policy allowlist (${DEPLOY_POLICY_FILENAME}).`,
       400,
       { excluded: plan.excluded },
       'EXCLUDED_REFERENCES',
@@ -1939,6 +2052,7 @@ export async function prepareDeployPreflight(projectsRoot: string, projectId: st
       sourcePath: f.sourcePath,
     })),
     excluded: plan.excluded,
+    policy: plan.policyEnforced ? { enforced: true as const } : null,
     totalFiles,
     totalBytes,
     warnings,
