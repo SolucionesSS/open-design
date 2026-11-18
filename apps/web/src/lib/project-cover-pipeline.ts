@@ -43,10 +43,67 @@ export const DECK_PREVIEW_HEIGHT = 720;
 const deckCoverCache = new Map<string, string>();
 const deckCoverInflight = new Map<string, Promise<string>>();
 
+// Persisted twin of the parsed deck cover documents: a deck cover costs a full
+// document download + parse per card. Keys are the cover `src` itself, which
+// already carries the project version (`?v=`) and the workspace-scoped claim,
+// so entries are version-bounded and never leak across identities. Bounded by
+// count and per-entry bytes; oversized or failing writes degrade to
+// memory-only behavior.
+const DECK_COVER_STORAGE_KEY = 'od.deck-covers.v1';
+const MAX_DECK_COVER_ENTRIES = 10;
+const MAX_DECK_COVER_BYTES = 300_000;
+
+function readStoredDeckCovers(): Record<string, string> {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(DECK_COVER_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string' && value.length > 0 && value.length <= MAX_DECK_COVER_BYTES) {
+        out[key] = value;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredDeckCovers(store: Record<string, string>): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(DECK_COVER_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // Quota or privacy mode: memory cache keeps working.
+  }
+}
+
+function storeDeckCover(src: string, parsed: string): void {
+  deckCoverCache.set(src, parsed);
+  if (parsed.length > MAX_DECK_COVER_BYTES) return;
+  const store = readStoredDeckCovers();
+  delete store[src];
+  store[src] = parsed;
+  const keys = Object.keys(store);
+  for (const oldest of keys.slice(0, Math.max(0, keys.length - MAX_DECK_COVER_ENTRIES))) {
+    delete store[oldest];
+  }
+  writeStoredDeckCovers(store);
+}
+
 /** The parsed cover-slide document for a deck URL, when a resolve already
  *  fetched it. Synchronous so a card can paint from it on first render. */
 export function getCachedDeckCover(src: string): string | undefined {
-  return deckCoverCache.get(src);
+  const cached = deckCoverCache.get(src);
+  if (cached) return cached;
+  // Read-through from the persisted twin (previous session/tab lifetime).
+  const stored = readStoredDeckCovers()[src];
+  if (typeof stored !== 'string' || stored.length === 0) return undefined;
+  deckCoverCache.set(src, stored);
+  return stored;
 }
 
 /**
@@ -150,7 +207,7 @@ export async function loadDeckCover(
     });
     if (!response.ok) throw new Error(`Failed to load project cover: ${response.status}`);
     const parsed = deckPreviewSrcDoc(await response.text());
-    if (!signal.aborted) deckCoverCache.set(src, parsed);
+    if (!signal.aborted) storeDeckCover(src, parsed);
     return parsed;
   }
   const existing = deckCoverInflight.get(src);
@@ -162,7 +219,7 @@ export async function loadDeckCover(
     })
     .then((html) => {
       const parsed = deckPreviewSrcDoc(html);
-      deckCoverCache.set(src, parsed);
+      storeDeckCover(src, parsed);
       deckCoverInflight.delete(src);
       return parsed;
     })

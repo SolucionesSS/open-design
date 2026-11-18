@@ -22,6 +22,52 @@ import type { ProjectCoverOverride } from '../components/project-cover';
 
 const MAX_COVER_SNAPSHOT_ENTRIES = 300;
 
+// Persisted twin of the in-memory map: cover decisions survive reloads, so a
+// fresh tab skips the `/files` + HEAD-probe waterfall per card and mounts
+// iframes with a known src immediately. Keys already carry the workspace
+// identity + project version, so entries cannot leak across workspaces and a
+// content update misses naturally. Best-effort: quota/privacy failures fall
+// back to memory-only behavior.
+const COVER_STORAGE_KEY = 'od.project-covers.v1';
+const COVER_KINDS = new Set(['html', 'image', 'video', 'logo']);
+
+function isStorableCoverSnapshot(value: unknown): value is ProjectCoverSnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const cover = (value as { cover?: unknown }).cover;
+  if (cover === null) return true;
+  if (!cover || typeof cover !== 'object' || Array.isArray(cover)) return false;
+  const candidate = cover as { kind?: unknown; name?: unknown; mtime?: unknown };
+  if (!COVER_KINDS.has(candidate.kind as string)) return false;
+  if (typeof candidate.name !== 'string' || candidate.name.length === 0) return false;
+  return candidate.mtime === undefined || typeof candidate.mtime === 'number';
+}
+
+function readStoredSnapshots(): Record<string, ProjectCoverSnapshot> {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(COVER_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, ProjectCoverSnapshot> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (isStorableCoverSnapshot(value)) out[key] = { cover: value.cover };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredSnapshots(store: Record<string, ProjectCoverSnapshot>): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(COVER_STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    // Quota or privacy mode: memory cache keeps working, persistence degrades.
+  }
+}
+
 interface ProjectCoverSnapshot {
   /** `null` is an authoritative "this project has no cover" decision. */
   cover: ProjectCoverOverride | null;
@@ -40,11 +86,24 @@ export function projectCoverSnapshotKey(
 /** `undefined` means "no snapshot"; a snapshot may hold a `null` cover. */
 export function getProjectCoverSnapshot(key: string): ProjectCoverSnapshot | undefined {
   const entry = snapshots.get(key);
-  if (entry === undefined) return undefined;
-  // LRU touch: re-insert so iteration order tracks recency.
+  if (entry !== undefined) {
+    // LRU touch: re-insert so iteration order tracks recency.
+    snapshots.delete(key);
+    snapshots.set(key, entry);
+    return entry;
+  }
+  // Read-through from the persisted twin (previous session/tab lifetime).
+  const stored = readStoredSnapshots()[key];
+  if (!isStorableCoverSnapshot(stored)) return undefined;
+  const restored: ProjectCoverSnapshot = { cover: stored.cover };
   snapshots.delete(key);
-  snapshots.set(key, entry);
-  return entry;
+  snapshots.set(key, restored);
+  while (snapshots.size > MAX_COVER_SNAPSHOT_ENTRIES) {
+    const oldest = snapshots.keys().next().value;
+    if (oldest === undefined) break;
+    snapshots.delete(oldest);
+  }
+  return restored;
 }
 
 export function setProjectCoverSnapshot(
@@ -58,6 +117,15 @@ export function setProjectCoverSnapshot(
     if (oldest === undefined) break;
     snapshots.delete(oldest);
   }
+  // Write-through: persist the bounded map so reloads skip re-probing.
+  const store = readStoredSnapshots();
+  delete store[key];
+  store[key] = { cover };
+  const keys = Object.keys(store);
+  for (const oldest of keys.slice(0, Math.max(0, keys.length - MAX_COVER_SNAPSHOT_ENTRIES))) {
+    delete store[oldest];
+  }
+  writeStoredSnapshots(store);
 }
 
 /**
@@ -70,9 +138,27 @@ export function invalidateProjectCoverSnapshots(projectId: string): void {
     const parts = key.split('|');
     if (parts[1] === projectId) snapshots.delete(key);
   }
+  // Persisted twin: a stale decision must not survive a reload either.
+  const store = readStoredSnapshots();
+  let changed = false;
+  for (const key of Object.keys(store)) {
+    if (key.split('|')[1] === projectId) {
+      delete store[key];
+      changed = true;
+    }
+  }
+  if (changed) writeStoredSnapshots(store);
 }
 
-/** Test-only: reset the cache between cases. */
+/** Test-only: reset the cache between cases. Also clears the persisted twin so
+ *  covers resolved in one test never satisfy the next (same invariant as the
+ *  in-memory map; see tests/setup/coalesced-get-reset.ts). */
 export function resetProjectCoverSnapshots(): void {
   snapshots.clear();
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(COVER_STORAGE_KEY);
+  } catch {
+    // Ignore.
+  }
 }

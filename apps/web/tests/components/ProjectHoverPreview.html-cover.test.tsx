@@ -99,6 +99,9 @@ function plate(container: HTMLElement): HTMLElement {
 describe('ProjectHoverPreview — HTML and deck covers (OPEND-2766)', () => {
   beforeEach(() => {
     resetProjectCoverSnapshots();
+    // Cover decisions and deck srcDocs persist to localStorage across reloads
+    // by design; clear it so each case starts from a cold cache.
+    window.localStorage.clear();
     filesByProject.clear();
     fetchMock.mockClear();
     vi.mocked(fetchProjectFiles).mockClear();
