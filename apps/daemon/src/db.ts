@@ -2008,6 +2008,11 @@ interface AwaitingInputCandidate {
   content: string;
 }
 
+/** Upper bound for IN-list scoping of the awaiting-input scans. Callers pass
+ * page-sized id sets; beyond this the query falls back to the unscoped scan
+ * rather than risking an old SQLITE_LIMIT_VARIABLE_NUMBER. */
+const MAX_AWAITING_INPUT_SCOPE_PARAMS = 2000;
+
 type AwaitingInputWinner = Omit<AwaitingInputCandidate, 'partitionKey' | 'content'>;
 
 /**
@@ -2071,7 +2076,14 @@ function listPartitionsAwaitingInput(
   return awaiting;
 }
 
-export function listProjectsAwaitingInput(db: SqliteDb) {
+export function listProjectsAwaitingInput(
+  db: SqliteDb,
+  scopeProjectIds?: Iterable<string>,
+) {
+  const scope = scopeProjectIds ? [...new Set(scopeProjectIds)] : null;
+  // An empty scope means the caller already knows nothing is visible: answer
+  // without touching the messages table at all.
+  if (scope && scope.length === 0) return new Set<string>();
   const rows = db
     .prepare(
       `SELECT c.project_id AS partitionKey,
@@ -2083,13 +2095,21 @@ export function listProjectsAwaitingInput(db: SqliteDb) {
          JOIN conversations c ON c.id = m.conversation_id
         WHERE m.role = 'assistant'
           AND ${AWAITING_INPUT_MARKER_PREFILTER}
+          ${scope && scope.length <= MAX_AWAITING_INPUT_SCOPE_PARAMS
+            ? `AND c.project_id IN (${scope.map(() => '?').join(',')})`
+            : ''}
         ORDER BY m.created_at DESC, m.position DESC`,
     )
-    .iterate() as Iterable<AwaitingInputCandidate>;
+    .iterate(...(scope && scope.length <= MAX_AWAITING_INPUT_SCOPE_PARAMS ? scope : [])) as Iterable<AwaitingInputCandidate>;
   return listPartitionsAwaitingInput(db, rows);
 }
 
-export function listConversationsAwaitingInput(db: SqliteDb) {
+export function listConversationsAwaitingInput(
+  db: SqliteDb,
+  scopeConversationIds?: Iterable<string>,
+) {
+  const scope = scopeConversationIds ? [...new Set(scopeConversationIds)] : null;
+  if (scope && scope.length === 0) return new Set<string>();
   const rows = db
     .prepare(
       `SELECT m.conversation_id AS partitionKey,
@@ -2100,9 +2120,12 @@ export function listConversationsAwaitingInput(db: SqliteDb) {
          FROM messages m
         WHERE m.role = 'assistant'
           AND ${AWAITING_INPUT_MARKER_PREFILTER}
+          ${scope && scope.length <= MAX_AWAITING_INPUT_SCOPE_PARAMS
+            ? `AND m.conversation_id IN (${scope.map(() => '?').join(',')})`
+            : ''}
         ORDER BY m.created_at DESC, m.position DESC`,
     )
-    .iterate() as Iterable<AwaitingInputCandidate>;
+    .iterate(...(scope && scope.length <= MAX_AWAITING_INPUT_SCOPE_PARAMS ? scope : [])) as Iterable<AwaitingInputCandidate>;
   return listPartitionsAwaitingInput(db, rows);
 }
 

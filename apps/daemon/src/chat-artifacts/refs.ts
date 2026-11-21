@@ -16,6 +16,7 @@ import type { ProjectFileKind } from '@open-design/contracts';
 
 import {
   getChatArtifactSnapshot,
+  getChatArtifactSnapshots,
   listMessageArtifactRows,
   listMessageArtifactRowsForConversation,
   type ChatArtifactSnapshotRow,
@@ -41,7 +42,12 @@ export function projectChatArtifactRefs(
   projectId: string,
   messageId: string,
 ): ChatArtifactRef[] {
-  return listMessageArtifactRows(db, messageId).map((row) => toRef(db, projectId, row));
+  const rows = listMessageArtifactRows(db, messageId);
+  const snapshots = getChatArtifactSnapshots(
+    db,
+    rows.map((row) => row.snapshotId).filter((id): id is string => !!id),
+  );
+  return rows.map((row) => toRef(db, projectId, row, snapshots.get(row.snapshotId ?? '')));
 }
 
 /**
@@ -54,9 +60,13 @@ export function projectConversationChatArtifactRefs(
   conversationId: string,
 ): Map<string, ChatArtifactRef[]> {
   const grouped = listMessageArtifactRowsForConversation(db, conversationId);
+  const snapshots = getChatArtifactSnapshots(
+    db,
+    [...grouped.values()].flat().map((row) => row.snapshotId).filter((id): id is string => !!id),
+  );
   const out = new Map<string, ChatArtifactRef[]>();
   for (const [messageId, rows] of grouped) {
-    out.set(messageId, rows.map((row) => toRef(db, projectId, row)));
+    out.set(messageId, rows.map((row) => toRef(db, projectId, row, snapshots.get(row.snapshotId ?? ''))));
   }
   return out;
 }
@@ -65,26 +75,27 @@ function toRef(
   db: Database.Database,
   projectId: string,
   row: MessageArtifactRow,
+  snapshot?: ChatArtifactSnapshotRow | null,
 ): ChatArtifactRef {
-  const snapshot = row.snapshotId ? getChatArtifactSnapshot(db, row.snapshotId) : null;
+  const resolved = snapshot ?? (row.snapshotId ? getChatArtifactSnapshot(db, row.snapshotId) : null);
   const ref: ChatArtifactRef = {
     id: row.id,
     label: row.labelAtCapture,
     kind: projectFileKind(row.kind),
     displayPolicy: row.displayPolicy,
-    snapshotState: refState(snapshot),
+    snapshotState: refState(resolved),
   };
   if (row.workspaceArtifactId) ref.workspaceArtifactId = row.workspaceArtifactId;
-  if (!snapshot || snapshot.captureState !== 'ready') return ref;
-  if (snapshot.motionPreviewJson) {
-    try { ref.motionPreview = JSON.parse(snapshot.motionPreviewJson); } catch { /* older/unreadable metadata uses the ordinary preview */ }
+  if (!resolved || resolved.captureState !== 'ready') return ref;
+  if (resolved.motionPreviewJson) {
+    try { ref.motionPreview = JSON.parse(resolved.motionPreviewJson); } catch { /* older/unreadable metadata uses the ordinary preview */ }
   }
-  ref.snapshotId = snapshot.id;
-  if (snapshot.contentDigest) {
-    ref.snapshotUrl = chatArtifactSnapshotContentUrl(projectId, snapshot.id);
+  ref.snapshotId = resolved.id;
+  if (resolved.contentDigest) {
+    ref.snapshotUrl = chatArtifactSnapshotContentUrl(projectId, resolved.id);
   }
-  if (snapshot.thumbnailDigest) {
-    ref.thumbnailUrl = chatArtifactSnapshotThumbnailUrl(projectId, snapshot.id);
+  if (resolved.thumbnailDigest) {
+    ref.thumbnailUrl = chatArtifactSnapshotThumbnailUrl(projectId, resolved.id);
   }
   return ref;
 }

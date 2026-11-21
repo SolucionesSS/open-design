@@ -167,6 +167,7 @@ import {
   fetchProjectFilePreview,
   fetchProjectPreviewBaseHref,
   fetchProjectFiles,
+  fetchProjectHtmlSources,
   fetchProjectFilePublicShareState,
   fetchProjectFilePublicShareFreshness,
   publicFileShareLinkFromRead,
@@ -6839,19 +6840,10 @@ function ReactComponentViewer({
     void (async () => {
       try {
         const files = await fetchProjectFiles(projectId, { workspaceContext });
-        const htmlNames = files
+        const htmlEntries = files
           .filter((entry) => /\.html?$/i.test(entry.name))
-          .map((entry) => entry.name);
-        const htmlSources = new Map<string, string>();
-        await Promise.all(
-          htmlNames.map(async (name) => {
-            const text = await fetchProjectFileText(projectId, name, {
-              workspaceContext,
-            }).catch(() => null);
-            if (text != null) htmlSources.set(name, text);
-            return text;
-          }),
-        );
+          .map((entry) => ({ name: entry.name, mtime: entry.mtime }));
+        const htmlSources = await fetchProjectHtmlSources(projectId, htmlEntries, workspaceContext ?? undefined);
         if (cancelled) return;
         setModuleEntries(findHtmlEntriesReferencing(file.name, htmlSources));
       } catch {

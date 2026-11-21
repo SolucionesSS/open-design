@@ -1,6 +1,12 @@
-import { useEffect, useState } from 'react';
-import { Excalidraw } from '@excalidraw/excalidraw';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import styles from './SketchEnginePrewarm.module.css';
+
+// Loaded lazily so the idle prewarm — not first paint — pays for the
+// Excalidraw bundle. SketchEditor is split the same way at its call site,
+// leaving this module the only other runtime importer.
+const Excalidraw = lazy(() =>
+  import('@excalidraw/excalidraw').then((m) => ({ default: m.Excalidraw })),
+);
 
 /**
  * Warms up the Excalidraw engine during idle time so the first sketch a user
@@ -74,12 +80,14 @@ export function SketchEnginePrewarm() {
 
   return (
     <div className={styles.prewarm} aria-hidden="true" data-testid="sketch-engine-prewarm">
-      <Excalidraw
-        viewModeEnabled
-        handleKeyboardGlobally={false}
-        detectScroll={false}
-        UIOptions={{ tools: { image: false } }}
-      />
+      <Suspense fallback={null}>
+        <Excalidraw
+          viewModeEnabled
+          handleKeyboardGlobally={false}
+          detectScroll={false}
+          UIOptions={{ tools: { image: false } }}
+        />
+      </Suspense>
     </div>
   );
 }

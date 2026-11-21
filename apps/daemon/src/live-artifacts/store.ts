@@ -731,17 +731,25 @@ export async function listLiveArtifacts(options: ListLiveArtifactsOptions): Prom
     throw error;
   }
 
-  const summaries: LiveArtifactSummary[] = [];
+  const candidates: string[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith('tmp-')) continue;
-
-    const artifactId = validateLiveArtifactStorageId(entry.name);
-    const paths = liveArtifactStorePaths(options.projectsRoot, options.projectId, artifactId);
-    const artifact = await readPersistedLiveArtifact(paths);
-    assertArtifactMatchesStorage(artifact, options.projectId, artifactId);
-
-    summaries.push(toSummary(artifact));
+    candidates.push(validateLiveArtifactStorageId(entry.name));
   }
+
+  // Reads are independent small files: run them concurrently instead of
+  // serially. A corrupt artifact.json still fails the list, as before —
+  // Promise.all preserves the first rejection.
+  const artifacts = await Promise.all(
+    candidates.map(async (artifactId) => {
+      const paths = liveArtifactStorePaths(options.projectsRoot, options.projectId, artifactId);
+      const artifact = await readPersistedLiveArtifact(paths);
+      assertArtifactMatchesStorage(artifact, options.projectId, artifactId);
+      return artifact;
+    }),
+  );
+
+  const summaries = artifacts.map(toSummary);
 
   summaries.sort((a, b) => {
     const updatedDelta = Date.parse(b.updatedAt) - Date.parse(a.updatedAt);

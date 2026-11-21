@@ -2790,6 +2790,55 @@ export async function fetchProjectFilePreview(
   }
 }
 
+// ETag-keyed text store for GET /files/:name (daemon serves ETag + 304).
+// Bounded to avoid unbounded growth across long sessions.
+const projectFileTextCache = new Map<string, { etag: string; text: string }>();
+
+// mtime-keyed HTML source store for the .jsx/.tsx module-entry sweep. The
+// sweep re-runs whenever the opened module changes, but sibling HTML entries
+// usually have not — serve those from memory instead of re-transferring.
+const projectHtmlSourcesCache = new Map<string, { mtime: number; text: string }>();
+
+function projectFileCacheKey(
+  projectId: string,
+  name: string,
+  workspaceContext?: WorkspaceCollabContext | null,
+): string {
+  return `${projectId}\n${workspaceContext ? JSON.stringify(workspaceContext) : ''}\n${name}`;
+}
+
+/** Fetch sibling HTML sources, reusing cached text for entries whose mtime
+ * has not moved. Entries that fail to load are skipped, as before. */
+export async function fetchProjectHtmlSources(
+  projectId: string,
+  entries: ReadonlyArray<{ name: string; mtime: number }>,
+  workspaceContext?: WorkspaceCollabContext | null,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  await Promise.all(
+    entries.map(async (entry) => {
+      const key = projectFileCacheKey(projectId, entry.name, workspaceContext);
+      const hit = projectHtmlSourcesCache.get(key);
+      if (hit && hit.mtime === entry.mtime) {
+        out.set(entry.name, hit.text);
+        return;
+      }
+      const text = await fetchProjectFileText(projectId, entry.name, {
+        workspaceContext: workspaceContext ?? undefined,
+      });
+      if (text != null) {
+        projectHtmlSourcesCache.set(key, { mtime: entry.mtime, text });
+        if (projectHtmlSourcesCache.size > 200) {
+          const oldest = projectHtmlSourcesCache.keys().next();
+          if (!oldest.done) projectHtmlSourcesCache.delete(oldest.value);
+        }
+        out.set(entry.name, text);
+      }
+    }),
+  );
+  return out;
+}
+
 export async function fetchProjectFileText(
   projectId: string,
   name: string,
@@ -2809,13 +2858,23 @@ export async function fetchProjectFileText(
   const init: RequestInit = {};
   if (options?.cache) init.cache = options.cache;
   if (options?.signal) init.signal = options.signal;
-  if (options?.workspaceContext) {
-    init.headers = workspaceProjectHeaders(options.workspaceContext);
-  }
+  const headers = new Headers(
+    options?.workspaceContext ? workspaceProjectHeaders(options.workspaceContext) : undefined,
+  );
+  // Daemon serves ETag + 304 on this route; reuse the last text on revalidation
+  // instead of re-transferring unchanged files. A cacheBustKey forces a fresh
+  // read and refreshes the entry.
+  const textCacheKey = projectFileCacheKey(projectId, name, options?.workspaceContext);
+  const cached = cacheBustKey == null ? projectFileTextCache.get(textCacheKey) : undefined;
+  if (cached) headers.set('If-None-Match', cached.etag);
+  // Preserve the historical request shape: no headers key at all when there
+  // is nothing to send.
+  if ([...headers.keys()].length > 0) init.headers = headers;
 
   try {
     const resp = await fetch(requestUrl, init);
     if (options?.signal?.aborted) return null;
+    if (resp.status === 304 && cached) return cached.text;
     if (!resp.ok) {
       console.warn('[fetchProjectFileText] failed:', {
         name,
@@ -2826,7 +2885,16 @@ export async function fetchProjectFileText(
       });
       return null;
     }
-    return await resp.text();
+    const text = await resp.text();
+    const etag = resp.headers.get('ETag');
+    if (etag) {
+      projectFileTextCache.set(textCacheKey, { etag, text });
+      if (projectFileTextCache.size > 200) {
+        const oldest = projectFileTextCache.keys().next();
+        if (!oldest.done) projectFileTextCache.delete(oldest.value);
+      }
+    }
+    return text;
   } catch (err) {
     if (
       options?.signal?.aborted ||

@@ -6353,6 +6353,8 @@ export function ProjectView({
     const conversationId = activeConversationId;
     if (!conversationId) return undefined;
     const timer = window.setInterval(() => {
+      // The terminal flip can wait for a visible tab; skip hidden ticks.
+      if (typeof document !== 'undefined' && document.hidden) return;
       void refreshConversationMessagesFromServer(conversationId);
     }, 4000);
     return () => window.clearInterval(timer);
@@ -8802,6 +8804,10 @@ export function ProjectView({
 
     void recoverArtifacts();
     const interval = window.setInterval(() => {
+      // Recovery reconciles client-side message projection only; while the
+      // tab is hidden there is nothing to show, so skip the tick (and its
+      // listMessages + refreshProjectFiles fan-out) until the next one.
+      if (typeof document !== 'undefined' && document.hidden) return;
       void recoverArtifacts();
     }, 1000);
 

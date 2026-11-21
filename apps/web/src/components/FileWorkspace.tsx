@@ -1,7 +1,9 @@
 import { useExperienceError } from '../observability/use-experience-error';
 import type { RecoveryActionBlockReason } from '../runtime/chat/recovery-gating';
 import {
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -161,7 +163,10 @@ import { LiveArtifactBadges } from './LiveArtifactBadges';
 import { MissingBrandFontsBanner } from './MissingBrandFontsBanner';
 import { LibraryPicker } from './LibraryPicker';
 import { QuickSwitcher } from './QuickSwitcher';
-import { SketchEditor } from './SketchEditor';
+// Split @excalidraw/excalidraw out of the initial project-page graph: the
+// editor (and the idle prewarm below) are the only runtime importers, and
+// neither is needed for first paint.
+const SketchEditor = lazy(() => import('./SketchEditor').then((m) => ({ default: m.SketchEditor })));
 import { SketchEnginePrewarm } from './SketchEnginePrewarm';
 import { useWorkspaceTabsDockRef } from './workspaceTabsDock';
 import {
@@ -4601,8 +4606,9 @@ export function FileWorkspace({
           null
         ) : isActiveSketch && activeFile ? (
           activeSketch?.loaded ? (
-            <SketchEditor
-              fileName={activeFile.name}
+            <Suspense fallback={<div className="viewer-empty">{t('workspace.loadingSketch')}</div>}>
+              <SketchEditor
+                fileName={activeFile.name}
               scene={activeSketch.scene}
               legacyItems={activeSketch.items}
               hasPreservedRawItems={
@@ -4638,7 +4644,8 @@ export function FileWorkspace({
               saving={activeSketch.saving}
               dirty={activeSketch.dirty || !activeSketch.persisted}
               savedAt={activeSketch.savedAt}
-            />
+              />
+              </Suspense>
           ) : (
             <div className="viewer-empty">{t('workspace.loadingSketch')}</div>
           )

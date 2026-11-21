@@ -63,7 +63,7 @@ export function resolveInstallationDir(dataDir: string): string {
   return dataDir;
 }
 
-function installationFilePath(installationDir: string): string {
+export function installationFilePath(installationDir: string): string {
   return join(installationDir, 'installation.json');
 }
 

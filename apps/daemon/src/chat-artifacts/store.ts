@@ -581,6 +581,27 @@ export function getChatArtifactSnapshot(
   return row ?? null;
 }
 
+/** Bulk mirror of getChatArtifactSnapshot: one query for a whole
+ * conversation's refs instead of one per artifact row. */
+export function getChatArtifactSnapshots(
+  db: SqliteDb,
+  ids: Iterable<string>,
+): Map<string, ChatArtifactSnapshotRow> {
+  const unique = [...new Set(ids)];
+  const out = new Map<string, ChatArtifactSnapshotRow>();
+  // Snapshot ids per conversation are small; chunk defensively all the same.
+  for (let i = 0; i < unique.length; i += 500) {
+    const chunk = unique.slice(i, i + 500);
+    const rows = db
+      .prepare(
+        `SELECT ${SNAPSHOT_COLS} FROM chat_artifact_snapshots WHERE id IN (${chunk.map(() => '?').join(',')})`,
+      )
+      .all(...chunk) as ChatArtifactSnapshotRow[];
+    for (const row of rows) out.set(row.id, row);
+  }
+  return out;
+}
+
 export interface SnapshotReadyInput {
   id: string;
   contentDigest?: string | null;

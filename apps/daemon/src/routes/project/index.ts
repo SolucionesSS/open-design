@@ -3362,7 +3362,6 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
     try {
       const locations = await configuredProjectLocations();
       const latestRunStatuses = listLatestProjectRunStatuses(db);
-      const awaitingInputProjects = listProjectsAwaitingInput(db);
       const activeRunStatuses = new Map();
       for (const run of design.runs.list()) {
         if (!run.projectId) continue;
@@ -3391,10 +3390,18 @@ export function registerProjectRoutes(app: Express, ctx: RegisterProjectRoutesDe
       // construction, unbound — so `workspaceId` is always `null`; no binding
       // lookup needed (a `listWorkspaceProjectBindings` scan here would only
       // ever resolve to misses).
+      const listedProjects = listUnboundProjects(db)
+        .filter((project: any) => projectVisibleForLocations(project, locations));
+      // The awaiting-input scan below only feeds the per-project status
+      // composed for these rows, so scope it to them instead of scanning the
+      // whole messages table on every list.
+      const awaitingInputProjects = listProjectsAwaitingInput(
+        db,
+        listedProjects.map((project: any) => project.id),
+      );
       /** @type {import('@open-design/contracts').ProjectsResponse} */
       const body = {
-        projects: listUnboundProjects(db)
-          .filter((project: any) => projectVisibleForLocations(project, locations))
+        projects: listedProjects
           .map((project: any) => ({
             ...project,
             workspaceId: null,
@@ -7767,12 +7774,31 @@ export function registerProjectFileRoutes(app: Express, ctx: RegisterProjectFile
       if (project?.metadata?.teamMirrorRevokedAt) {
         return sendApiError(res, 404, 'PROJECT_NOT_FOUND', 'not found');
       }
+      const ifNoneMatch = String(req.headers['if-none-match'] ?? '');
+      if (ifNoneMatch !== '') {
+        // Revalidation without reading bytes: stat-only fast path. A weak
+        // validator from size+mtime is enough — agent/CLI rewrites always
+        // bump mtime, and a same-millisecond same-size rewrite would serve
+        // the previous bytes only until the next mtime tick moves it.
+        const known = await resolveProjectFilePath(
+          PROJECTS_DIR,
+          projectId,
+          fileSplat,
+          project?.metadata,
+        );
+        const etag = `W/"${known.size.toString(16)}-${Math.floor(known.mtime).toString(16)}"`;
+        if (ifNoneMatch.split(',').map((s) => s.trim()).includes(etag) || ifNoneMatch.trim() === '*') {
+          res.setHeader('ETag', etag);
+          return res.status(304).end();
+        }
+      }
       const file = await readProjectFile(
         PROJECTS_DIR,
         projectId,
         fileSplat,
         project?.metadata,
       );
+      res.setHeader('ETag', `W/"${file.size.toString(16)}-${Math.floor(file.mtime).toString(16)}"`);
       res.type(file.mime).send(file.buffer);
     } catch (err: any) {
       const status = err && err.code === 'ENOENT' ? 404 : 400;

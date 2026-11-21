@@ -17,8 +17,8 @@
 // These values are local-only and should not be logged or returned outside
 // this machine.
 
-import { readFileSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { readFileSync, statSync } from 'node:fs';
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import path from 'node:path';
 import type { OdNextRolloutMode } from '@open-design/contracts';
@@ -27,6 +27,7 @@ import { amrSettingsBindingConflict, stripAmrEndpointOverrides } from './integra
 import { expandHomePrefix } from './home-expansion.js';
 
 import {
+  installationFilePath,
   readInstallationFile,
   readInstallationFileSync,
   resolveInstallationDir,
@@ -774,6 +775,70 @@ export async function readMetricsConsent(dataDir: string): Promise<MetricsConsen
 /** A fixed package binding owns endpoints and credentials. Do not round-trip
  * stale CLI overrides from older installs back through the web config writer.
  * This is a read projection only; explicit conflicting writes still fail. */
+
+/** Per-request app-config reads (project detail, vela routes, run analytics)
+ * were re-reading and re-parsing two JSON files on every call. Entries below
+ * are validated by (mtimeMs, size) on both source files before every hit, so
+ * external edits, migrations, and direct file writes stay visible; only an
+ * identical-size rewrite inside the same millisecond could serve stale data.
+ * Values are cloned on the way out so callers can never mutate the cache. */
+type AppConfigCacheStamp = {
+  mtimeMs: number;
+  size: number;
+  missing: boolean;
+};
+
+type AppConfigCacheEntry = {
+  config: AppConfigCacheStamp;
+  install: AppConfigCacheStamp;
+  value: AppConfigPrefs;
+};
+
+const appConfigCache = new Map<string, AppConfigCacheEntry>();
+
+function stampFromStat(st: { mtimeMs: number; size: number }): AppConfigCacheStamp {
+  return { mtimeMs: st.mtimeMs, size: st.size, missing: false };
+}
+
+const MISSING_STAMP: AppConfigCacheStamp = { mtimeMs: -1, size: -1, missing: true };
+
+async function stampFile(file: string): Promise<AppConfigCacheStamp> {
+  try {
+    return stampFromStat(await stat(file));
+  } catch {
+    return MISSING_STAMP;
+  }
+}
+
+function stampFileSync(file: string): AppConfigCacheStamp {
+  try {
+    return stampFromStat(statSync(file));
+  } catch {
+    return MISSING_STAMP;
+  }
+}
+
+function stampsEqual(a: AppConfigCacheStamp, b: AppConfigCacheStamp): boolean {
+  if (a.missing || b.missing) return a.missing && b.missing;
+  return a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+function readAppConfigCache(dataDir: string, config: AppConfigCacheStamp, install: AppConfigCacheStamp): AppConfigPrefs | null {
+  const entry = appConfigCache.get(dataDir);
+  if (!entry) return null;
+  if (!stampsEqual(entry.config, config) || !stampsEqual(entry.install, install)) return null;
+  return structuredClone(entry.value);
+}
+
+function storeAppConfigCache(dataDir: string, config: AppConfigCacheStamp, install: AppConfigCacheStamp, value: AppConfigPrefs): void {
+  appConfigCache.set(dataDir, { config, install, value: structuredClone(value) });
+}
+
+/** Evict a dataDir's cached config. Called after writes through this module;
+ * external writers are covered by stamp comparison on read instead. */
+export function evictAppConfigCache(dataDir: string): void {
+  appConfigCache.delete(dataDir);
+}
 function projectBoundAmrConfig(prefs: AppConfigPrefs): AppConfigPrefs {
   const amr = prefs.agentCliEnv?.amr;
   if (!amr) return prefs;
@@ -786,6 +851,23 @@ function projectBoundAmrConfig(prefs: AppConfigPrefs): AppConfigPrefs {
 }
 
 export async function readAppConfig(dataDir: string): Promise<AppConfigPrefs> {
+  const configStamp = await stampFile(configFile(dataDir));
+  const installStamp = await stampFile(installationFilePath(resolveInstallationDir(dataDir)));
+  const hit = readAppConfigCache(dataDir, configStamp, installStamp);
+  if (hit) return hit;
+  const value = await readAppConfigUncached(dataDir);
+  // Re-stamp after the read: the legacy→installation.json migration above
+  // may have created installation.json between the pre-read stats and now.
+  storeAppConfigCache(
+    dataDir,
+    await stampFile(configFile(dataDir)),
+    await stampFile(installationFilePath(resolveInstallationDir(dataDir))),
+    value,
+  );
+  return value;
+}
+
+async function readAppConfigUncached(dataDir: string): Promise<AppConfigPrefs> {
   const base = projectBoundAmrConfig(await readAppConfigFileOnly(dataDir));
   // Channel-root installation file is the new authoritative source for the
   // identity bits that must survive a namespace-scoped data-dir wipe. It
@@ -825,6 +907,16 @@ export async function readAppConfig(dataDir: string): Promise<AppConfigPrefs> {
 // legacy→channel-root migration *write*, which is a side effect rather than
 // part of the read result.
 export function readAppConfigSync(dataDir: string): AppConfigPrefs {
+  const configStamp = stampFileSync(configFile(dataDir));
+  const installStamp = stampFileSync(installationFilePath(resolveInstallationDir(dataDir)));
+  const hit = readAppConfigCache(dataDir, configStamp, installStamp);
+  if (hit) return hit;
+  const value = readAppConfigUncachedSync(dataDir);
+  storeAppConfigCache(dataDir, configStamp, installStamp, value);
+  return value;
+}
+
+function readAppConfigUncachedSync(dataDir: string): AppConfigPrefs {
   const base = projectBoundAmrConfig(readAppConfigFileOnlySync(dataDir));
   const installation = readInstallationFileSync(resolveInstallationDir(dataDir));
   if (
@@ -967,6 +1059,7 @@ async function doWrite(
   const tmp = file + '.' + randomBytes(4).toString('hex') + '.tmp';
   await writeFile(tmp, JSON.stringify(normalizedNextWithoutRetiredAgents, null, 2), 'utf8');
   await rename(tmp, file);
+  evictAppConfigCache(dataDir);
   for (const observer of configObservers.get(dataDir) ?? []) {
     try { observer(); } catch { /* preference persistence must not depend on background consumers */ }
   }
